@@ -28,3 +28,4 @@ Desktop.ini
 # --- 本地敏感/临时 ---
 *.token
 secrets.*
+test_target.txt
