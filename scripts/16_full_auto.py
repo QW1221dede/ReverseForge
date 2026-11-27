@@ -14,10 +14,25 @@
 
     unpack   ① 一键拆包      apktool 全解包；非 APK 走通用拆解
     decrypt  ② 一键解密      assets/ raw 里的加密文件、明文头+密文体，全算法撞一遍
-    patch    ③ 一键删前置验证 六类"安全"补丁（APK）；脚本类做源码文本替换
+    patch    ③ 一键删前置验证 三层，任一层生效程序就能跑：
+                 ③  改判定     把校验方法改成恒返回"通过"
+                 ③b 摘处置     把"不让程序跑"的 exit/kill/finish 换成 nop
+                 ③c 联网覆盖   把服务器回复强制成"通过"（状态码/成功标志）
     pack     ④ 按原类型重建   ← 关键：进去什么，出来就是什么
     desktop  ⑤ 成品丢桌面    后缀跟成品真实类型走（.sh 就落 .sh）
     verify   ⑥ 真机安装验证   勾了才做，没 adb 设备就如实写"未验证"
+
+【为什么 ③ 要分三层】
+    开发者拦你的手段是逐层升级的，所以中和也得逐层跟上：
+
+    第一层 改判定：把 isVip() 改成 return true。
+        他换个检测方式（改特征、加反射、藏 native）这一层就失效。
+    第二层 摘处置：不管他怎么检测，最后要让你跑不了只能调 exit/kill。
+        把那一句换成 nop，检测再准也退不出去。套几层包装都一样。
+    第三层 联网覆盖：卡密根本不在客户端判，客户端只是念服务器的话。
+        前两层都白改 —— 得让它"听到"的回复是同意。
+
+    三层都不做"假装成功"的汇报：哪层没生效、为什么没生效，报告里写明。
 
 【只有一个入口】
     以前「卡密绕过」和「全自动化」是两套脚本、两套判据，
@@ -172,8 +187,11 @@ if target.is_file():
 LED.inp(target, _kind, "原始样本（只读，全程不修改）")
 
 gate = {"结构": "未做", "签名": "未做", "回读": "未做",
-        "运行": "未验证（无设备/非 APK）", "守卫": "未做"}
+        "运行": "未验证（无设备/非 APK）", "守卫": "未做", "拒跑": "未做",
+        "联网": "未做"}
 guard_stat: dict = {"found": 0, "done": 0, "skipped": []}
+TERMSTAT: dict = {}                    # 终结动作统计（exit/kill/finish/throw/hang）
+NETSTAT: dict = {}                     # 联网校验统计（状态码/成功标志）
 desktop_apk = None
 final_apk = None
 _unpack_result = None
@@ -540,69 +558,163 @@ def do_hardening(root: Path) -> None:
 
 
 def do_patch(root: Path) -> list:
+    """
+    ③ 删前置验证 —— 分两层，层层独立，任一层生效就够程序跑起来。
+
+        第一层（改判定）：把校验方法改成恒返回「通过」。
+            优点：语义干净，界面逻辑照原样走。
+            缺点：必须先认出检测点；作者换一套特征、藏进 so 就漏。
+
+        第二层（摘处置）：把「不让程序跑」的执行指令本身换成 nop。
+            优点：检测手法再花也没用 —— 不管前面套多少层包装、藏得多深，
+                 最后总要调那么一句 exit / killProcess，那一句是白的。
+            缺点：不知道它为什么退（所以第一层仍然要做，两层互补）。
+    """
     rf.step("③ 扫描前置验证点", 46)
     # 全工具只有这一处补丁判据（原来 15/16 各写一遍，同一份 APK
     # 一个出 20 条能过、一个出 10 条还要卡密，就是这么来的）。
     rep = rf.patch_scan(root)
+    ops: list = []
+    gpts: list = []
+
     if not rep.points:
         put("- 扫描不到校验点。两种可能：")
         put("    · 这个包之前已经打过补丁（校验点被改掉，再扫自然扫不出来）")
         put("    · 逻辑在 so / 加固壳里，dex 侧没有可改的地方")
-        put("- 不中断流程：按现有 smali 继续重建，成品照样出（不会被这一步卡死）。")
+        put("- 不中断：先摘「拒绝运行」动作（这一层不依赖识别校验点），再按现状重建。")
         gate["结构"] = "无校验点可改（可能已处理过），按现状重建"
-        return []
+    else:
+        pre = len(rep.pre_run)
+        gpts = [p for p in rep.points if p.guard]
+        guard_stat["found"] = len(gpts)
+        put(f"- 校验点 {len(rep.points)} 个（启动路径 {pre} 个）")
+        if gpts:
+            put(f"- 防改动/防调试守卫 {len(gpts)} 个（重打包必然踩，逐条中和）：")
+            for p in gpts[:12]:
+                tag = "　⚠ 内联在生命周期，仅报告" if p.inline_guard else ""
+                put(f"  · {p.category} · {p.cls_simple}.{p.method}{tag}")
 
-    pre = len(rep.pre_run)
-    gpts = [p for p in rep.points if p.guard]
-    guard_stat["found"] = len(gpts)
-    put(f"- 校验点 {len(rep.points)} 个（启动路径 {pre} 个）")
-    if gpts:
-        put(f"- 防改动/防调试守卫 {len(gpts)} 个（重打包必然踩，逐条中和）：")
-        for p in gpts[:12]:
-            tag = "　⚠ 内联在生命周期，仅报告" if p.inline_guard else ""
-            put(f"  · {p.category} · {p.cls_simple}.{p.method}{tag}")
+        rf.step("③ 生成补丁方案", 52)
+        # 只保留一套判据（原来「15 一键绕过」和这里各写一遍，结果不一致）。
+        # 第一步：启动路径上的点 + 全部守卫（守卫不在路径上也得改），
+        # 不过滤安全、不设置信度门槛、上限放宽到 30 条给守卫留位置。
+        _ids = [x.strip() for x in str(ids or "").replace("，", ",").split(",")
+                if x.strip()]
+        ops = rf.patch_plan(rep, ids=_ids or None, only_pre=True, max_ops=30,
+                            min_confidence=int(min_conf or 0))
+        if _ids:
+            # 点名改某几个点时，守卫仍然必须补进来：
+            # 漏掉一个签名自校验，包能装、一开就退，点名改的东西也白改。
+            have = {(o.file, o.line) for o in ops}
+            for o in rf.patch_plan(rep, only_pre=True, max_ops=30,
+                                   min_confidence=0, guards_only=True):
+                if (o.file, o.line) not in have:
+                    ops.append(o)
+                    have.add((o.file, o.line))
+            put(f"- 已指定校验点 {len(_ids)} 个，另自动补入守卫补丁")
+        # 第二步：全自动化**唯一多出来的那一步** —— 把运行中的服务器复核 /
+        #        失效处理也删掉。只认「清空方法体」这一类（void_noop）：
+        #        服务器判卡密失效后调的方法，清空后照样跑，且 void 方法清空
+        #        不会破坏调用方的栈平衡，不会让 App 崩（不是无脑全量加补丁）。
+        extra = _runtime_kill_switches(rep, ops)
+        if extra:
+            put(f"- 额外删除运行中服务器校验 {len(extra)} 处（这一步是自动化独有的）：")
+            for op in extra:
+                put(f"  · {op.reason[:90]}")
+            ops.extend(extra)
+        if ops:
+            put(f"- 改判定 {len(ops)} 条（让校验恒返回「通过」）：")
+            for op in ops[:16]:
+                put(f"  · {op.reason[:90]}")
+            if len(ops) > 16:
+                put(f"  · …… 另 {len(ops) - 16} 条同类")
+        else:
+            put("- 识别到校验点但没有可自动改的判定（缺建议），全靠下面兜底。")
 
-    rf.step("③ 生成补丁方案", 52)
-    # 只保留一套判据（原来「15 一键绕过」和这里各写一遍，结果不一致）。
-    # 第一步：启动路径上的点 + 全部守卫（守卫不在路径上也得改），
-    # 不过滤安全、不设置信度门槛、上限放宽到 30 条给守卫留位置。
-    _ids = [x.strip() for x in str(ids or "").replace("，", ",").split(",")
-            if x.strip()]
-    ops = rf.patch_plan(rep, ids=_ids or None, only_pre=True, max_ops=30,
-                        min_confidence=int(min_conf or 0))
-    if _ids:
-        # 点名改某几个点时，守卫仍然必须补进来：
-        # 漏掉一个签名自校验，包能装、一开就退，点名改的东西也白改。
-        have = {(o.file, o.line) for o in ops}
-        for o in rf.patch_plan(rep, only_pre=True, max_ops=30,
-                               min_confidence=0, guards_only=True):
-            if (o.file, o.line) not in have:
-                ops.append(o)
-                have.add((o.file, o.line))
-        put(f"- 已指定校验点 {len(_ids)} 个，另自动补入守卫补丁")
-    # 第二步：全自动化**唯一多出来的那一步** —— 把运行中的服务器复核 /
-    #        失效处理也删掉。只认「清空方法体」这一类（void_noop）：
-    #        服务器判卡密失效后调的方法，清空后照样跑，且 void 方法清空
-    #        不会破坏调用方的栈平衡，不会让 App 崩（不是无脑全量加补丁）。
-    extra = _runtime_kill_switches(rep, ops)
-    if extra:
-        put(f"- 额外删除运行中服务器校验 {len(extra)} 处（这一步是自动化独有的）：")
-        for op in extra:
-            put(f"  · {op.reason[:90]}")
-        ops.extend(extra)
-    if not ops:
-        put("- 识别到校验点，但没有可自动应用的改法（缺 best 建议）。"
-            "不中断：按现状重建，卡密可能仍需手动处理。")
-        gate["结构"] = "有校验点但无自动改法，按现状重建"
-        return []
-    put(f"- 补丁 {len(ops)} 条（含运行中复核/失效处理）：")
-    for op in ops:
-        put(f"  · {op.reason[:90]}")
+    # ------------------------------------------------------------------
+    # ③b 第二层：摘除「拒绝运行」的终结动作
+    # ------------------------------------------------------------------
+    rf.step("③b 摘除「拒绝运行」动作", 56)
+    term_ops, term_stat = rf.patch_terminators(root)
+    TERMSTAT.update(term_stat)
+
+    # 方法级补丁已经整段重写过的行，里面的 exit/finish 跟着一起没了，
+    # 不能再单独补一条 —— 否则先 nop 改了这一行，方法块原文就匹配不上了。
+    covered: set[tuple[str, int]] = set()
+    for o in ops:
+        for ln in range(int(o.line), int(int(o.end_line or o.line)) + 1):
+            covered.add((str(o.file), ln))
+    _before = len(term_ops)
+    term_ops = [t for t in term_ops if (str(t.file), t.line) not in covered]
+
+    if term_stat.get("applied"):
+        put(f"- 定位到「不让程序跑」的动作 {term_stat['applied']} 处：")
+        put(f"    · 进程自杀 System.exit/Runtime.halt {term_stat['exit']} 处")
+        put(f"    · 强杀进程 killProcess/sendSignal {term_stat['kill']} 处")
+        if term_stat.get("finish"):
+            put(f"    · 强退界面 finish {term_stat['finish']} 处")
+        if term_stat.get("throw"):
+            put(f"    · 抛异常崩溃 throw {term_stat['throw']} 处（只报，不硬改）")
+        if term_stat.get("hang"):
+            put(f"    · 静默挂起 sleep/await {term_stat['hang']} 处（只报，交 Frida）")
+        put(f"- 摘除 {len(term_ops)} 条（换成 nop，检测不通过也退不出去）：")
+        for op in term_ops[:10]:
+            put(f"  · {op.reason[:88]}")
+        if len(term_ops) > 10:
+            put(f"  · …… 另 {len(term_ops) - 10} 条")
+        if term_stat.get("skipped_crash_handler"):
+            put("- 崩溃处理器里的 killProcess 跳过（那是正常善后，摘了崩溃会卡白屏）")
+        put("- 这一层不看「是不是校验点」：不管检测藏 native、套几层包装、"
+            "每次更新换一套特征，最后那句 exit 都得走这里。")
+        ops.extend(term_ops)
+    else:
+        put("- 没有找到 exit/kill 这类终结动作"
+            "（这个包的拦截方式可能是白屏/改流程，走第一层）。")
+
+    # ------------------------------------------------------------------
+    # ③c 第三层：联网校验 —— 让"服务器说不行"变成"服务器说行"
+    # ------------------------------------------------------------------
+    # 前两层管的都是客户端自己做的判断。但很多卡密根本不在客户端判：
+    # 客户端只是老老实实把服务器的话念出来。本地一句 exit 都没写错，
+    # 它只是在执行判决。这层改的是"它听到的回复"。
+    rf.step("③c 联网校验覆盖", 58)
+    net_ops, net_stat = rf.patch_network(root, scope="check")
+    NETSTAT.update(net_stat)
+    if net_stat.get("points"):
+        put(f"- 读服务器回复的地方 {net_stat['points']} 处"
+            f"（其中校验链路 {net_stat['check_scope']} 处）：")
+        put(f"    · 读状态码 {net_stat['code']} 处 / 读成功标志 {net_stat['ok']} 处")
+        # 方法级补丁整段重写过的，里面的 getResponseCode 也跟着没了
+        _net = [o for o in net_ops
+                if (str(o.file), o.line) not in covered
+                and (str(o.file), int(o.end_line or o.line)) not in covered]
+        if _net:
+            put(f"- 强制返回「通过」{len(_net)} 条（move-result 后就地覆盖，"
+                f"不认判断写法）：")
+            for o in _net[:8]:
+                put(f"  · {o.reason}")
+            if len(_net) > 8:
+                put(f"  · …… 另 {len(_net) - 8} 条")
+            ops.extend(_net)
+            put("- 服务端真正的权益（远程停卡、在线开关）仍在服务器上；"
+                "这里做到的是「客户端认为一切正常并继续跑」。")
+        else:
+            put("- 校验链路上的读回复点已被前面的方法级补丁覆盖，无需单独改。")
+        # 加固包 / 逻辑在 so 里的，静态改不动 —— 给运行时脚本兜底
+        try:
+            js = rf.frida_net(out / "hook_net.js")
+            put(f"- ✓ 联网覆盖脚本：`{js.name}`"
+                "（`frida -U -f 包名 -l hook_net.js` → 状态码 + 返回体一起洗白）")
+            LED.outp("③c 联网", js, "状态码 + 返回体洗白", "Frida 脚本")
+        except Exception as e:                              # noqa: BLE001
+            put(f"- 联网脚本生成失败（不影响成品）：{e}")
+    else:
+        put("- 没找到读服务器回复的地方（纯本地校验，或联网逻辑在 so 里）。")
 
     # 守卫结算：哪些已中和、哪些真没辙 —— 明写，不冒充"全处理完了"
-    _done = {p.cid for p in gpts if p.suggestions
-             and not p.inline_guard}
+    _skip: list = []
     if gpts:
+        _done = {p.cid for p in gpts if p.suggestions and not p.inline_guard}
         _skip = [p for p in gpts if p.cid not in _done]
         guard_stat["done"] = len(_done)
         guard_stat["skipped"] = [(p.category, p.cls_simple, p.method)
@@ -611,10 +723,16 @@ def do_patch(root: Path) -> list:
             put(f"- ⚠ {len(_skip)} 个守卫没法自动中和（内联在生命周期 / so 内）：")
             for p in _skip[:8]:
                 put(f"    · {p.category} · {p.cls_simple}.{p.method}")
+        # 摘除终结动作后，这些"没中和"的守卫也退不了程序了 —— 但要如实区分：
+        # 判定还在（界面可能仍显示"未授权/试用"），只是不再终止运行。
+        if _skip and term_ops:
+            put("    （它们仍然会判为不通过，但退出动作已摘，程序不会因此停）")
 
-    # 改不动的部分（内联守卫 / 壳）→ 给一份 Frida 覆盖脚本，运行时照样解决。
+    # 改不动的部分（内联守卫 / 壳 / throw / 挂起）→ Frida 覆盖脚本
     _hr = HARDCASE.get("hr")
-    if _skip or (_hr is not None and _hr.is_packed):
+    _need_frida = (_skip or (term_stat.get("throw") or term_stat.get("hang"))
+                   or (_hr is not None and _hr.is_packed))
+    if _need_frida and rep.points:
         try:
             js = rf.frida(rep, out=out / "hook.js")
             put(f"- ✓ Frida 覆盖脚本：`{js.name}`"
@@ -623,12 +741,16 @@ def do_patch(root: Path) -> list:
         except Exception as e:                              # noqa: BLE001
             put(f"- Frida 脚本生成失败（不影响成品）：{e}")
 
-    rf.step("③ 预演（不写盘）", 56)
+    if not ops:
+        put("- 这一包没有任何可自动应用的改法，按现状重建。")
+        return []
+
+    rf.step("③ 预演（不写盘）", 60)
     dry = rf.patch_apply(root, ops, dry_run=True, backup=out / "备份")
     if not dry.ok:
         raise RuntimeError("预演没过，停止。原文件没动。")
 
-    rf.step("③ 应用补丁（删前置验证）", 60)
+    rf.step("③ 应用补丁（删前置验证 + 摘终结动作）", 64)
     res = rf.patch_apply(root, ops, dry_run=False, backup=out / "备份")
     put(f"- 应用：{res.text().splitlines()[0]}")
     if not res.ok:
@@ -827,6 +949,36 @@ elif _nonapk:
     gate["守卫"] = "不适用（非 APK）"
 else:
     gate["守卫"] = "未发现（该包没有签名/调试/环境检测）"
+
+# 拒跑关：不管检测藏多深，退出动作没了就退不了
+_t = TERMSTAT
+if _nonapk:
+    gate["拒跑"] = "不适用（非 APK）"
+elif _t.get("applied"):
+    _tail = []
+    if _t.get("throw"):
+        _tail.append(f"throw {_t['throw']} 处只报未改")
+    if _t.get("hang"):
+        _tail.append(f"挂起 {_t['hang']} 处交 Frida")
+    gate["拒跑"] = (f"已摘除 {_t['applied']} 处（exit {_t['exit']} / "
+                   f"kill {_t['kill']} / finish {_t.get('finish', 0)}）"
+                   + ("；" + "，".join(_tail) if _tail else ""))
+elif _t.get("exit") or _t.get("kill"):
+    gate["拒跑"] = f"识别 {_t.get('exit', 0) + _t.get('kill', 0)} 处但未摘（检查日志）"
+else:
+    gate["拒跑"] = "未发现（没有 exit/kill 这类硬退出）"
+
+# 联网关：服务器说什么都不影响客户端继续跑
+_n = NETSTAT
+if _nonapk:
+    gate["联网"] = "不适用（非 APK）"
+elif _n.get("patched"):
+    gate["联网"] = (f"已强制通过 {_n['patched']} 处"
+                   f"（状态码 {_n['code']} / 成功标志 {_n['ok']}）")
+elif _n.get("points"):
+    gate["联网"] = f"有 {_n['points']} 处网络调用，但不在校验链路（未改）"
+else:
+    gate["联网"] = "无联网校验（纯本地判定）"
 
 put("")
 put("## 三、结果")

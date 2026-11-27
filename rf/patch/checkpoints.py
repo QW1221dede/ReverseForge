@@ -1314,6 +1314,93 @@ def to_plan(rep: CheckpointReport, ids: list[str] | None = None,
     return ops
 
 
+# ---------------------------------------------------------------------------
+# 兜底：摘除"拒绝运行"的终结动作
+# ---------------------------------------------------------------------------
+def plan_terminators(root: str | Path, *, keep_exit: bool = False,
+                     keep_finish: bool = False,
+                     max_ops: int = 240) -> tuple[list[PatchOp], dict]:
+    """
+    全包扫描终结动作，生成"换成 nop"的补丁。
+
+    **与 patch_scan / to_plan 的根本区别**：不看这个方法有没有被识别成校验点。
+    只要里面有 exit / killProcess，就摘。理由是：
+
+        检测手法可以千变万化（换特征、加反射、藏 native、每次更新换一套），
+        但"不让程序跑"这个结果，物理上只有那么几条路可走。
+
+    所以这是兜底层：改判定那一层漏了、认错了、被加固挡住了，都还有这一层
+    保底 —— 退出动作已经不存在，程序只能继续往下走。
+
+    连带好处：中间套多少层包装都无效。作者写 Utils.check() → guard() →
+    native 判定 → System.exit(0)，前面全是黑的，最后这一句还是白的。
+
+    返回 (补丁列表, 统计)。
+    """
+    rt = Path(root)
+    ops: list[PatchOp] = []
+    stat = {"files": 0, "methods": 0, "exit": 0, "kill": 0, "finish": 0,
+            "throw": 0, "hang": 0, "guarded_methods": 0, "applied": 0,
+            "skipped_crash_handler": 0}
+
+    if not rt.is_dir():
+        return ops, stat
+
+    for f in sorted(rt.rglob("*.smali")):
+        try:
+            methods, *_ = _parse_file(f)
+        except Exception:                              # noqa: BLE001
+            continue
+        if not methods:
+            continue
+        stat["files"] += 1
+        for m in methods:
+            stat["methods"] += 1
+            if not m.body:
+                continue
+            # 崩溃处理器里的 killProcess 是正常善后（进程已经要死了，
+            # 杀掉是为了触发系统回收），摘掉它反而会让崩溃后卡成白屏。
+            # 作者很少拿 uncaughtException 当反破解开关 —— 真要用也是
+            # "检测到就主动 throw"，那种在调用侧，不在 handler 里。
+            if m.name == "uncaughtException" or "uncaughtException" in m.params:
+                stat["skipped_crash_handler"] += 1
+                continue
+            body_lines = [t for _, t in m.body]
+            # 守卫上下文：这个方法自己就在做检测（决定 finish/throw 算不算）
+            guarded = bool(guards.scan_method("\n".join(body_lines),
+                                              " ".join(m.calls), m.strings))
+            if guarded:
+                stat["guarded_methods"] += 1
+            for term in guards.find_terminators(body_lines, guarded=guarded):
+                if term.kind in ("exit_proc", "kill_self"):
+                    stat["exit" if term.kind == "exit_proc" else "kill"] += 1
+                elif term.kind == "finish_kill":
+                    stat["finish"] += 1
+                elif term.kind == "throw_fatal":
+                    stat["throw"] += 1
+                elif term.kind == "hang":
+                    stat["hang"] += 1
+
+                # 只摘"换成 nop 一定安全"的：invoke 返回 void，后面没有 move-result
+                if not term.nop_safe:
+                    continue
+                if keep_exit and term.kind in ("exit_proc", "kill_self"):
+                    continue
+                if keep_finish and term.kind == "finish_kill":
+                    continue
+                abs_line = m.body[term.line - 1][0]
+                where = f"{m.cls_simple}.{m.name}"
+                ops.append(PatchOp(
+                    file=str(f), line=abs_line, end_line=abs_line,
+                    original=term.text, replacement="    nop",
+                    reason=f"摘除{term.category} · {where}（{term.why[:34]}）",
+                    kind="nop_call"))
+                stat["applied"] += 1
+                if len(ops) >= max_ops:
+                    return ops, stat
+    return ops, stat
+
+
 def _js_type(desc: str) -> str:
     """Java 类型描述符 → Frida overload 用的名字。"""
     prim = {"Z": "boolean", "B": "byte", "C": "char", "S": "short", "I": "int",

@@ -24,6 +24,35 @@
 
 另一部分是**加固体检**：壳、动态加载 dex、抽代码 —— 这些改 smali 没用，
 必须脱壳，所以要如实报出来，不能让自动化假装"处理完了"。
+
+--------------------------------------------------------------------------
+第二层：终结动作（terminator）—— 比改判定更狠的一刀
+--------------------------------------------------------------------------
+上面那套是"改判定"：把检测方法改成恒返回"通过"。但它有个前提 ——
+必须先认出检测点。而聪明的作者可以：
+    · 用一百种姿势检测（时间差、内存指纹、类加载顺序、so 里算）
+    · 把检测藏进反射 / 动态代理 / native
+    · 每次更新换一套特征
+
+但"不让程序跑"这件事，**物理上只有那么几条路可走**：
+
+    System.exit / Runtime.halt / Process.killProcess     进程自杀
+    Activity.finish / finishAffinity                     界面强退
+    throw new RuntimeException/SecurityException         未捕获异常崩溃
+    while(true) / Thread.sleep(Long.MAX)                 静默挂起（白屏装死）
+
+中间套多少层包装（Utils.kill()、反射调 exit、native 调 _exit）都没用 ——
+最底层那个调用一定长得一样。所以除了改判定，还把**终结动作本身**摘掉：
+
+    行级替换成 nop：invoke-static {v0}, Ljava/lang/System;->exit(I)V
+                 →  nop
+
+这条 invoke 是 3 字节，nop 汇编后长度不同也没关系 —— smali 的标签、
+try/catch、debug 信息都是符号化的，apktool 汇编时统一重算偏移。
+System.exit 返回 void，后面不会有 move-result，所以直接 nop 安全。
+
+于是"检测到就退"这条链被物理切断：判定没改成功也没关系，
+退出的动作已经不存在了，程序只能继续往下跑。
 """
 
 from __future__ import annotations
@@ -131,6 +160,111 @@ _COMBO_RULES: list[tuple[str, str, re.Pattern, re.Pattern, str, int, str]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# 终结动作：检测到问题之后"不让程序跑"的实际执行指令
+# ---------------------------------------------------------------------------
+# (kind, 类别, 正则, 默认摘除?, 权重, 人话说明)
+#   默认摘除：
+#      True  → 无条件摘（这些 API 正常业务几乎不用，退登录也很少真退进程）
+#      False → 只在"守卫上下文"里摘（finish 太常见，正常关页面也用它）
+_TERMINATORS: list[tuple[str, str, re.Pattern, bool, int, str]] = [
+    # ① 进程自杀：最直接、也最常见的一招
+    ("exit_proc", "进程自杀",
+     re.compile(r"Ljava/lang/System;->exit\(I\)V|"
+                r"Ljava/lang/Runtime;->(?:exit|halt)\(I\)V"),
+     True, 78,
+     "直接 System.exit / Runtime.halt 杀掉整个进程 —— 一装就退最省事的写法"),
+
+    # ② 杀进程：比 exit 更隐晦，绕开一些 exit hook
+    ("kill_self", "强杀进程",
+     re.compile(r"Landroid/os/Process;->(?:killProcess|killProcessQuiet)\(I\)V|"
+                r"Landroid/os/Process;->sendSignal\(II\)V"),
+     True, 76,
+     "Process.killProcess(myPid) / sendSignal(SIGKILL) 强杀自己"),
+
+    # ③ 界面强退：App 没死，但退到桌面，看起来就是"不让用"
+    ("finish_kill", "强退界面",
+     re.compile(r"invoke-\w+(?:/\w+)?\s+\{[^}]*\},\s*L[^;]*Activity;->(finish|finishAffinity|finishAndRemoveTask)\(\)V"),
+     False, 62,
+     "调用 finish / finishAffinity 把界面关掉（检测不过就退回桌面）"),
+
+    # ④ 致命抛出：未捕获 → 进程崩溃，日志里还看不出原因
+    ("throw_fatal", "抛异常崩溃",
+     re.compile(r"throw\s+p\d+|^\s*throw\s+v\d+"),
+     False, 56,
+     "throw 未捕获异常让 App 崩掉（常配 SecurityException / IllegalStateException）"),
+
+    # ⑤ 静默挂起：不崩不退，就是白屏 / 转圈不动
+    ("hang", "静默挂起",
+     re.compile(r"invoke-\w+(?:/\w+)?\s+\{[^}]*\},\s*Ljava/lang/Thread;->sleep\(J\)V|"
+                r"Ljava/util/concurrent/CountDownLatch;->await\(\)V|"
+                r"Ljava/lang/Object;->wait\(\)V"),
+     False, 50,
+     "sleep(Long.MAX) / latch.await() 让线程永久阻塞 —— 界面白屏，看着像卡死"),
+]
+
+# 这些常量出现在 throw 附近，说明是"检测不通过"的崩溃，不是正常业务异常
+_FATAL_WORDS = re.compile(
+    r"(?i)(检测|校验|签名|非法|破解|篡改|外挂|作弊|debug|frida|xposed|root|"
+    r"signature|integrity|tamper|hack|cheat|invalid|unauthor|verify)")
+
+
+@dataclass
+class Terminator:
+    """一个"不让程序跑"的具体动作。"""
+    kind: str
+    category: str
+    line: int                  # 1 基行号
+    text: str                  # 原始指令（去首尾空白）
+    weight: int
+    why: str
+    guarded: bool = False      # 是否处在守卫上下文（方法里有检测特征）
+
+    @property
+    def nop_safe(self) -> bool:
+        """能不能安全地换成 nop。"""
+        return self.kind in ("exit_proc", "kill_self")
+
+
+def find_terminators(lines: list[str], *, guarded: bool = False) -> list[Terminator]:
+    """
+    扫一个 smali 方法，找出所有"拒绝运行"的终结动作。
+
+        lines    方法体切行（1 基行号 = 下标+1）
+        guarded  这个方法是否已判定为守卫（决定 finish/throw 要不要算）
+
+    只看单行，不做跨行推断 —— 宁可漏报，不能把正常逻辑改坏。
+    """
+    out: list[Terminator] = []
+    for i, raw in enumerate(lines, 1):
+        t = raw.strip()
+        if not t or t.startswith(("#", ".", ":")):
+            continue
+        for kind, cat, rx, unconditional, weight, why in _TERMINATORS:
+            if not rx.search(t):
+                continue
+            # 有条件摘除的类别：只认守卫上下文
+            if not unconditional and not guarded:
+                continue
+            out.append(Terminator(kind, cat, i, t, weight, why, guarded))
+            break
+    return out
+
+
+def is_fatal_throw(lines: list[str], idx: int, strings: list[str]) -> bool:
+    """
+    这行 throw 是不是"检测不通过"的崩溃。
+
+    idx 是 0 基下标。判据：往前 12 行内 new-instance 的是 SecurityException /
+    IllegalStateException / RuntimeException，且方法常量里有校验类字眼。
+    """
+    head = "\n".join(lines[max(0, idx - 12):idx + 1])
+    if not re.search(r"SecurityException|IllegalStateException|RuntimeException|"
+                     r"IllegalArgumentException|AssertionError", head):
+        return False
+    return any(_FATAL_WORDS.search(s) for s in strings)
+
+
 @dataclass
 class GuardHit:
     kind: str
@@ -139,6 +273,8 @@ class GuardHit:
     weight: int
     why: str
     evidence: str = ""
+
+
 
 
 def scan_method(code: str, calls: str, strings: list[str]) -> list[GuardHit]:

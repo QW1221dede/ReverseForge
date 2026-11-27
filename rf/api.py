@@ -59,6 +59,7 @@ from .decrypt import ciphers as decC
 from .decrypt import keys as deckeys
 from .patch import checkpoints as cpmod
 from .patch import engine as patchmod
+from .patch import netcheck as netmod
 from .patch import smali as smalimod
 
 
@@ -535,6 +536,48 @@ class Api:
         if not ops:
             self.log("  （没有可自动应用的建议，可用 patch_apply 手写 PatchOp）")
         return ops
+
+    def patch_terminators(self, smali_root: str | Path, *,
+                          keep_exit: bool = False, keep_finish: bool = False,
+                          max_ops: int = 240
+                          ) -> tuple[list[cpmod.PatchOp], dict]:
+        """
+        兜底摘除"拒绝运行"的终结动作（exit / killProcess 等换成 nop）。
+
+        不看它是不是校验点 —— 只认"这一句会让程序停"。
+        返回 (补丁, 统计)。统计里有 exit/kill/finish/throw/hang 各自命中数。
+        """
+        ops, stat = cpmod.plan_terminators(smali_root, keep_exit=keep_exit,
+                                           keep_finish=keep_finish, max_ops=max_ops)
+        self.log(f"终结动作摘除：{stat['applied']} 条 "
+                 f"（exit {stat['exit']} / kill {stat['kill']} / "
+                 f"finish {stat['finish']} / throw {stat['throw']} / "
+                 f"挂起 {stat['hang']}）")
+        return ops, stat
+
+    def patch_network(self, smali_root: str | Path, *, scope: str = "check",
+                      max_ops: int = 60) -> tuple[list[cpmod.PatchOp], dict]:
+        """
+        联网校验：让客户端认为服务器一直同意。
+
+        scope="check" 只改疑似授权/登录的方法（默认）；
+        scope="all"   全包改（连业务接口的 404 也当 200，慎用）。
+
+        改法是在 getResponseCode / code() 的返回值上就地覆盖，
+        不认判断写法（==200 / >=200 / >=400 判错三种都能覆盖）。
+        """
+        ops, stat = netmod.plan_network(smali_root, scope=scope, max_ops=max_ops)
+        self.log(f"联网校验点：{stat['points']} 个（状态码 {stat['code']} / "
+                 f"成功标志 {stat['ok']}），出补丁 {stat['patched']} 条")
+        for op in ops[:12]:
+            self.log(f"  · {op.reason}  @{Path(op.file).name}:{op.line}")
+        return ops, stat
+
+    def frida_net(self, out: str | Path) -> Path:
+        """单独生成联网覆盖脚本（状态码/成功标志/返回体洗白）。"""
+        p = netmod.write_frida_net(out)
+        self.log(f"联网覆盖脚本 → {p}")
+        return p
 
     def patch_apply(self, smali_root: str | Path, ops: list[cpmod.PatchOp],
                     dry_run: bool = False, backup: str | Path | None = None
