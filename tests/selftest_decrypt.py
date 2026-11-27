@@ -223,6 +223,28 @@ fr = CR.keystream_reuse(c1, c2, cribs=[b'{"user":"admin"'])
 check("密钥流复用能读出另一段片段", bool(fr), f"{len(fr)} 段")
 
 # ---------------------------------------------------------------------------
+section("14", "完整容器（改后缀 APK / ZIP）不得误判为密文")
+import io
+import zipfile
+_zbuf = io.BytesIO()
+with zipfile.ZipFile(_zbuf, "w", zipfile.ZIP_DEFLATED) as _zf:
+    _zf.writestr("classes.dex", os.urandom(4096))
+    _zf.writestr("assets/config.json", PLAIN)
+_zip = _zbuf.getvalue()
+p = OUT / "fake_apk.apk.1"
+p.write_bytes(_zip)
+sz = segments.analyze(_zip)
+print(f"  · 分段：{sz.split.brief()}")
+check("完整 ZIP 不判明文头+密文", not sz.split.found
+      and "完整 ZIP 容器" in sz.split.note, sz.split.note)
+rep = auto.salvage(p, budget=8)
+print(f"  · 试解：{rep.summary()}")
+check("完整容器早退给出正确诊断", not rep.hits and "完整 ZIP 容器" in rep.summary(),
+      rep.summary()[:60])
+check("明文头+密文仍能识别", sm.split.found and sm.split.head_len == len(head),
+      f"尾部熵 {segments.shannon(mixed[len(head):]) if len(mixed) > len(head) else 0:.2f}")
+
+# ---------------------------------------------------------------------------
 print()
 if FAILED:
     print(f"失败 {len(FAILED)} 项：")

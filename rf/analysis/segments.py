@@ -60,6 +60,27 @@ S_MIXED = "mixed"        # 说不清
 S_CN = {S_TEXT: "明文", S_BINARY: "二进制结构", S_CIPHER: "密文",
         S_COMPRESS: "压缩流", S_PADDING: "填充", S_MIXED: "混合"}
 
+# 从第 0 字节就带结构头的完整容器。这类文件**不是**「明文头 + 密文」：
+# 容器内部的压缩数据天然高熵，会被滑窗熵判据误判成密文尾，
+# 再把整个文件（可能几百 MB）送去撞解密，白跑一轮还给出错误结论。
+# 典型翻车：ACE拦截2.0.apk.1 的 "PK" 两字节被 _snap_boundary 当成明文头。
+_CONTAINER_MAGICS: tuple[tuple[bytes, str], ...] = (
+    (b"PK\x03\x04", "ZIP"),
+    (b"PK\x05\x06", "ZIP"),
+    (b"PK\x07\x08", "ZIP"),
+    (b"\x7fELF", "ELF"),
+    (b"dex\n", "DEX"),
+    (b"\x89PNG", "PNG"),
+    (b"\xff\xd8\xff", "JPEG"),
+    (b"%PDF", "PDF"),
+    (b"SQLite format 3", "SQLite"),
+    (b"Rar!\x1a\x07", "RAR"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+)
+
 
 def shannon(data: bytes) -> float:
     if not data:
@@ -351,6 +372,13 @@ def find_split(data: bytes, window: int = 4096, step: int | None = None,
     if n < min_head + min_tail:
         sp.note = "文件太小，无法分段"
         return sp
+
+    # 完整容器优先：这类文件开头的 ASCII 字节（如 ZIP 的 "PK"）不是明文头，
+    # 后面高熵的是压缩数据而非密文。必须先于熵判据早退。
+    for _magic, _name in _CONTAINER_MAGICS:
+        if data.startswith(_magic):
+            sp.note = f"文件头是完整 {_name} 容器，不做明文头+密文切分"
+            return sp
 
     head_end, exact = _prefix_text_end(data)
     if head_end < min_head:

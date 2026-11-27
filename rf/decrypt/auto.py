@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,6 +104,10 @@ class SalvageReport:
 
     def summary(self) -> str:
         if not self.hits:
+            # 早退分支（完整容器 / 文件太小 / 读不了）已有明确诊断，
+            # 不能被"密钥不在这台机器上"这句套话盖掉。
+            if self.notes:
+                return "；".join(self.notes)
             return (f"没解出来（试了 {self.tried} 次，{self.elapsed:.1f}s）。"
                     f"这通常意味着密钥不在这台机器上，或者用了自定义算法")
         b = self.hits[0]
@@ -214,6 +219,18 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         rep.notes.append("文件太小，无法试解")
         return rep
 
+    # ---- 完整容器不是待解密的裸密文 ----
+    # 例如改了后缀的 APK（*.apk.1）：它的 ZIP 条目本身是压缩数据，熵接近 8，
+    # 拿去撞 96 次解密必然全失败，还让人误以为"密钥不在这台机器上"。
+    # 这里早退并给出正确下一步，省掉几十秒无效穷举。
+    _mb, _mname = C.magic_bonus(data)
+    if _mb >= C.STRONG_MAGIC:
+        rep.notes.append(
+            f"文件头是完整 {_mname} 容器，不是待解密的裸密文；"
+            "请先解包（unpack_any / apktool），再对内部被加密的单个文件试解"
+        )
+        return rep
+
     # ---- 分段：如果是"明文头 + 密文"，只解密文部分 ----
     seg = segments.analyze(data)
     rep.split = seg.split
@@ -238,9 +255,10 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     hits: list[Hit] = []
     near: list[Hit] = []          # 35-44 分的"差一点"片段：整体没救时至少留个抓手
     seen: set[str] = set()
+    solved: bool = False          # 已拿到强魔数满分解（gzip→ELF/ZIP 这类），后续算法可跳过
 
     def add(method: str, out: bytes, offset: int, key: str = "", note: str = "") -> None:
-        nonlocal hits, near
+        nonlocal hits, near, solved
         rep.tried += 1
         if not out or len(out) < 4:
             return
@@ -258,6 +276,8 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         if h in seen:
             return
         seen.add(h)
+        if sc >= 95:
+            solved = True
         hits.append(Hit(method=method, offset=offset, score=sc, out=out,
                         preview=_preview(out), key=key, note=note))
 
@@ -296,11 +316,31 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             cands = K.merge(cands, extra, limit=200)
     ordered = K.ordered_keys(cands, with_common=True, limit=80)
     rep.keys_used = len(cands)
-    for off in body_offsets[:8]:
-        if off <= 0:
-            continue
+    # 跳过明文头再解压缩。分段给出的 head_end 是最可信的真实起点，
+    # 必须第一个试——自解压脚本（tail +skip | gzip -cd）的 payload 就在那里。
+    # 不能像旧版那样只扫 body_offsets[:8]：数值小的对齐偏移会把它挤出前列，
+    # 结果 gzip 数据被拿去撞几十次加密算法，一次都不解压缩。
+    _comp_offs = [o for o in body_offsets if o > 0]
+    if seg.split.found and seg.split.head_end > 0 and seg.split.head_end in _comp_offs:
+        _comp_offs.remove(seg.split.head_end)
+        _comp_offs.insert(0, seg.split.head_end)
+    for off in _comp_offs[:24]:
         out, how = C.decompress_auto(data[off:])
-        if out:
+        if not out:
+            continue
+        # 带强魔数的解压结果（ELF/ZIP/DEX...）是铁证，直接按满分收，
+        # 不走 add() 的 garble 可读性打分——二进制 ELF 本来就不"可读"。
+        _mb, _mn = C.magic_bonus(out)
+        if _mb >= C.STRONG_MAGIC:
+            _h = hashlib.sha256(out[:8192]).hexdigest()[:16]
+            if _h not in seen:
+                seen.add(_h)
+                solved = True
+                hits.append(Hit(method=f"{how}（{_mn}）", offset=off, score=100,
+                                out=out, preview=f"{_mn} 容器 {len(out)}B",
+                                note="压缩层·强魔数"))
+            continue
+        if _worth_unwrap(out):
             add(how, out, off, note="压缩层（跳过头部）")
 
     # ---- 2) 单字节 XOR ----
@@ -317,9 +357,18 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     crib_offs = [0]
     if seg.split.found and seg.split.head_end > 0:
         crib_offs.append(seg.split.head_end)
+    # 明文头本身就是最可靠的已知明文：从里面抠出连续可打印片段当 crib，
+    # 喂给 XOR/RC4 类攻击。弱加密只要密钥流重复，有 crib 就能确定解出。
+    head_cribs: list[bytes] = []
+    if seg.split.found and 0 < seg.split.head_end <= 8192:
+        head = data[:seg.split.head_end]
+        for m in re.finditer(rb"[\x20-\x7e]{16,}", head):
+            head_cribs.append(m.group()[:64])
+            if len(head_cribs) >= 6:
+                break
     try:
-        for ch in CR.crib_attack(data, offsets=crib_offs,
-                                 scorer=score_output):
+        for ch in CR.crib_attack(data, cribs=head_cribs or None,
+                                 offsets=crib_offs, scorer=score_output):
             if not ch.plain:
                 continue
             sc = ch.score or score_output(ch.plain)
