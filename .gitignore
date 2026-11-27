@@ -17,6 +17,7 @@ logs/
 dist/
 release/*.zip
 release/*.sha256
+release/SHA256SUMS.txt
 build/
 
 # --- IDE / 系统 ---

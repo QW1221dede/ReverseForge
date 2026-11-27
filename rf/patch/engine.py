@@ -411,7 +411,11 @@ def rebuild(unpack_dir: str | Path, out_apk: str | Path | None = None,
         res.dur = time.time() - t0
         return res
     res.unsigned = str(unsigned)
-    res.log.append(f"✓ 编译完成 {unsigned.stat().st_size / 1048576:.1f}MB")
+    # 小包按 MB 保留一位小数会显示成「0.0MB」，看着像编译出了空包；
+    # 1MB 以下改用 KB。
+    _n = unsigned.stat().st_size
+    _sz = f"{_n / 1048576:.1f}MB" if _n >= 1048576 else f"{max(1, round(_n / 1024))}KB"
+    res.log.append(f"✓ 编译完成 {_sz}")
 
     work = unsigned
     if align:

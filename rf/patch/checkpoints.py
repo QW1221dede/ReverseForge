@@ -506,7 +506,7 @@ def _branch_ops(m: _Method) -> list[Suggestion]:
         bm = _BRANCH_RE.match(s)
         if not bm:
             continue
-        op, reg, lab = bm.group(1), bm.group(2), bm.group(3)
+        op, lab = bm.group(1), bm.group(3)
         if lab not in labels:
             continue
         # 该分支之后 6 行内是否有"返回常量"或退出调用

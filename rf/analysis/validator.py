@@ -275,7 +275,6 @@ def validate_smali(text: str, filename: str = "<smali>") -> Result:
     r.stats = {"lines": len(lines)}
 
     has_class = False
-    in_method = False
     in_annotation = 0
     method_name = ""
     method_line = 0
@@ -314,7 +313,6 @@ def validate_smali(text: str, filename: str = "<smali>") -> Result:
             continue
         if s.startswith(".method"):
             depth_methods += 1
-            in_method = True
             method_line = i
             method_name = s.split()[-1] if len(s.split()) > 1 else "?"
             regs_declared, max_reg = -1, -1
@@ -336,7 +334,6 @@ def validate_smali(text: str, filename: str = "<smali>") -> Result:
                         f"方法 {method_name} 缺少标签定义，补丁改跳转时必须保留原标签",
                         code[:80]))
                     r.ok = False
-            in_method = False
             continue
         if s.startswith(".field"):
             fields += 1

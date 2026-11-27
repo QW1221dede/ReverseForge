@@ -123,14 +123,18 @@ class Ledger:
             "sha256": _sha(p), "note": note})
 
     def outp(self, step: str, p: Path | None, note: str = "",
-             kind: str = "", real: str = "") -> None:
+             kind: str = "", real: str = "",
+             intermediate: bool = False) -> None:
         if p is None:
             return
         self.outputs.append({
             "step": step, "path": str(p), "name": p.name,
             "size": _size(p), "type": kind or _guess_type(p),
             "real": real or (p.suffix.lower().lstrip(".")),
-            "sha256": _sha(p), "note": note})
+            "sha256": _sha(p), "note": note,
+            # 中间件（拆包目录这类）只留在清单里给机器读，
+            # 不参与「进 → 出」的人类可读汇总，否则小白看到「出：apktool 0 B」一头雾水
+            "intermediate": intermediate})
 
 
 def _size(p: Path) -> int:
@@ -233,7 +237,8 @@ def do_unpack() -> Path:
     if not un.apktool_dir:
         raise RuntimeError("拆包失败：" + "；".join(un.errors[:3]))
     put(f"- ✓ 解包完成：`{un.apktool_dir}`")
-    LED.outp("① 拆包", Path(un.apktool_dir), "apktool 全解包", "smali 工程目录")
+    LED.outp("① 拆包", Path(un.apktool_dir), "apktool 全解包", "smali 工程目录",
+             intermediate=True)
     return Path(un.apktool_dir)
 
 
@@ -1123,6 +1128,16 @@ def _usage_note(detail: Path) -> str:
             L += ["　　这是压缩包，直接解压使用；已经按原类型重新打包好了。", ""]
         else:
             L += ["　　按原类型重建的可执行文件/脚本，直接使用即可。", ""]
+        # 根目录还躺着一个 .idsig，说明里不解释的话小白会当成"多余的东西"
+        try:
+            sig = next(iter(sorted(detail.parent.glob(
+                main_product.stem + "*.idsig"))), None)
+        except OSError:
+            sig = None
+        if sig is not None:
+            L += [f"　　{sig.name}", "",
+                  "　　　　这是成品的签名记录，只有「同一应用要再装一次」时才会用到；",
+                  "　　　　平时不用管它，别删也别单独传手机。", ""]
     else:
         L += ["要用的文件", "",
               "　　本次没有生成成品（执行范围停在中间步骤），", ""
@@ -1168,4 +1183,6 @@ if LED.outputs:
     rf.log("── 进 → 出 ──")
     rf.log(f"  进：{target.name}（{getattr(_kind, 'label', '目录')}）")
     for r in LED.outputs:
+        if r.get("intermediate"):
+            continue
         rf.log(f"  出：{r['name']}　{r['type']}　{_human(r['size'])}")

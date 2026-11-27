@@ -1410,7 +1410,6 @@ class App(_ROOT_BASE):
 
         bar = tk.Frame(win, bg=T.BG)
         bar.pack(fill="x", padx=14, pady=(0, 12))
-        side = tk.StringVar(value="我自己的积木")
 
         def save() -> None:
             from ..analysis import validator
@@ -1437,14 +1436,16 @@ class App(_ROOT_BASE):
             msg.configure(text=f"✓ 已保存 → {p.name}", fg=T.OK)
             win.after(700, win.destroy)
 
+        def check() -> None:
+            # 一次校验、两处共用结果：原来 text= 和 fg= 各算一遍，
+            # 同一个按钮点一次跑两次 validate，还可能出现两处结论不一致。
+            ok = validator.validate(code_t.get("1.0", "end"),
+                                    "python", "<b>").ok
+            msg.configure(text="语法 OK" if ok else "语法有问题",
+                          fg=T.OK if ok else T.ERR)
+
         ttk.Button(bar, text="校验语法", style="Ghost.TButton",
-                   command=lambda: msg.configure(
-                       text=("语法 OK" if validator.validate(
-                           code_t.get("1.0", "end"), "python", "<b>").ok
-                             else "语法有问题"),
-                       fg=T.OK if validator.validate(
-                           code_t.get("1.0", "end"), "python", "<b>").ok else T.ERR)
-                   ).pack(side="left")
+                   command=check).pack(side="left")
         ttk.Button(bar, text="保存到积木库", style="Accent.TButton",
                    command=save).pack(side="left", padx=8)
         ttk.Button(bar, text="取消", style="Ghost.TButton",
@@ -1921,6 +1922,7 @@ class App(_ROOT_BASE):
         return ops
 
     def _patch_run(self, mode: str) -> None:
+        from ..patch import engine as pe
         if self._patch_busy:
             return
         if not self._patch_root:
@@ -1942,7 +1944,6 @@ class App(_ROOT_BASE):
                 return
             self._patch_busy = True
             self.lbl_patch_status.configure(text="重建中…（apktool 编译需要时间）")
-            from ..patch import engine as pe
             self._bg(lambda: pe.rebuild(self._patch_root, out, ops=ops),
                      lambda r, e: self._patch_rebuild_done(r, e))
             return
@@ -1956,7 +1957,6 @@ class App(_ROOT_BASE):
                 return
         self._patch_busy = True
         self.lbl_patch_status.configure(text="预演中…" if dry else "应用补丁中…")
-        from ..patch import engine as pe
 
         def work():
             return pe.apply(self._patch_root, ops, dry_run=dry)

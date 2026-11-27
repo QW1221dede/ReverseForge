@@ -417,7 +417,8 @@ class FileKind:
                 f"熵{self.entropy:>5.2f}  {self.confidence:>3}%  {flags}")
 
 
-def _human(n: int) -> str:
+def human_size(n: int) -> str:
+    """字节数 → 人读的大小。按量级换单位，小文件不会显示成 0.0MB。"""
     if n < 1024:
         return f"{n}B"
     if n < 1024 * 1024:
@@ -425,6 +426,10 @@ def _human(n: int) -> str:
     if n < 1024 * 1024 * 1024:
         return f"{n / 1024 / 1024:.1f}MB"
     return f"{n / 1024 / 1024 / 1024:.2f}GB"
+
+
+# 向后兼容：本模块内部原来叫 _human
+_human = human_size
 
 
 # ---------------------------------------------------------------------------

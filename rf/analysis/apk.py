@@ -40,6 +40,7 @@ from typing import Callable
 
 from .. import config
 from ..tools import runner
+from .filetype import human_size as _human
 from ..tools.registry import registry
 from . import dex as dexmod
 
@@ -297,7 +298,7 @@ class ApkPipeline:
             return self.result
 
         self.log(f"✓ 包名 {self.info.package or '未知'}  版本 {self.info.version_name or '?'}"
-                 f"  大小 {self.info.size / 1048576:.1f}MB  条目 {self.info.entry_count}")
+                 f"  大小 {_human(self.info.size)}  条目 {self.info.entry_count}")
         if self.info.packers:
             self.log(f"⚠ 疑似加固：{'、'.join(self.info.packers)} —— 反编译结果会大量缺失，需先脱壳")
 
@@ -452,7 +453,7 @@ class ApkPipeline:
         if not i:
             return "尚未分析"
         lines = [
-            f"文件      {Path(i.path).name}  ({i.size / 1048576:.1f} MB)",
+            f"文件      {Path(i.path).name}  ({_human(i.size)})",
             f"包名      {i.package or '—'}",
             f"版本      {i.version_name or '—'} ({i.version_code or '—'})",
             f"应用名    {i.label or '—'}",
@@ -487,7 +488,7 @@ def _render_md(i: ApkInfo, r: UnpackResult) -> str:
     for k, v in (
         ("包名", i.package), ("版本名", i.version_name), ("版本号", i.version_code),
         ("应用名", i.label), ("minSdk", i.min_sdk), ("targetSdk", i.target_sdk),
-        ("大小", f"{i.size / 1048576:.2f} MB"), ("ZIP 条目", str(i.entry_count)),
+        ("大小", _human(i.size)), ("ZIP 条目", str(i.entry_count)),
     ):
         L.append(f"| {k} | {v or '—'} |")
     L.append("")

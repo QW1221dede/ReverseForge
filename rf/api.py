@@ -43,6 +43,7 @@ from . import config
 from .tools import runner
 from .tools.registry import registry
 from .analysis import apk as apkmod
+from .analysis.filetype import human_size
 from .analysis import crypto as cryptomod
 from .analysis import dex as dexmod
 from .analysis import native as nativemod
@@ -220,7 +221,7 @@ class Api:
             raise RfError("APK 无效：" + "；".join(info.errors))
         if not quiet:
             self.log(f"  包名 {info.package or '未知'} / 版本 {info.version_name or '?'} / "
-                     f"{info.size / 1048576:.1f}MB")
+                     f"{human_size(info.size)}")
             if info.packers:
                 self.log(f"  ⚠ 疑似加固：{'、'.join(info.packers)}")
         return info

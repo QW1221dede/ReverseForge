@@ -16,7 +16,7 @@ ReverseForge · 逆锻台
 
 from __future__ import annotations
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __all__ = ["config", "tools", "registry", "runner"]
 
 from . import config                       # noqa: E402

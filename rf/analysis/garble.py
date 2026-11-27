@@ -241,7 +241,6 @@ def diagnose(text: str, sample: int = 4000) -> GarbleReport:
         rep.note = "样本不足 8 字符，不下结论"
         return rep
 
-    n = len(s)
     rep.cjk_ratio = _ratio(s, len(_CJK.findall(s)))
     rep.ascii_ratio = _ratio(s, sum(1 for c in s if 32 <= ord(c) < 127))
     rep.replacement_ratio = _ratio(s, s.count("\ufffd"))

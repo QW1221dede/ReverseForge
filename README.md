@@ -108,10 +108,10 @@ by **scripts** — one line like `rf.apk_unpack(path)` runs unpack + decompile, 
   2. segments       分段：找明文头/密文分界，顺手捞密钥
   3. decrypt_auto   自动试解（编码/压缩/XOR/RC4/AES/TEA/OpenSSL）
 ── 1/1 mixed.bin
-   类型：明文头 + 密文（混合文件） · 熵 7.74 · 可信 75%
-   明暗分界：明文 48B + 密文 700B（可信 96%）
+   类型：明文头 + 密文（混合文件） · 熵 7.72 · 可信 75%
+   明暗分界：明文 48B + 密文 700B（可信 90%）
    头部密钥：pass1234
-   解密：RC4（'pass1234'）· 偏移 48（得分 100）
+   解密：RC4（'pass1234'）· 偏移 48（得分 78）
 ```
 
 默认是**规则引擎**：离线、零延迟、结果可复现。只有当你在
@@ -246,7 +246,7 @@ python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 | `06_ghidra.py` | Ghidra 完整分析，每函数导出一个 .c | 分钟到小时 |
 | `07_core_deps.py` | **建跨文件调用图 → 找校验点 → 回溯入口链路**（可选顺带全量注释） | 75 个类约 3 秒 |
 | `08_patch_scan.py` | 启动校验扫描：证据 + 置信度 + 补丁建议 + Frida 脚本 | 151 个 smali 约 0.5 秒 |
-| `09_patch_apply.py` | 预演 → 应用 → 重建 → 签名 → 验签 → 回读（全程可回滚） | 小包约 8 秒 |
+| `09_patch_apply.py` | 预演 → 应用 → 重建 → 签名 → 验签 → 回读（全程可回滚） | 小包约 10 秒 |
 | `10_snippet_build.py` | 从积木库挑一组拼成可运行脚本（自动排序 + 校验） | 秒级 |
 | `11_crypto_test.py` | 本机强加密实测：AES-GCM / ChaCha20 / HMAC / PBKDF2 | 约 4 秒 |
 | `12_any_file.py` | **任意文件**画像：类型 → 分段（明文头/密文）→ 乱码诊断 → 校验点 | 秒级 |
@@ -630,7 +630,7 @@ apktool b → zipalign -p 4 → apksigner sign（本地调试证书）
           → 重新解包新 APK，逐条确认补丁文本真的进了 dex
 ```
 
-样本实测：应用 2 条 → 重建 12KB APK → 验签通过 → 回读 2/2，约 7 秒。
+样本实测：应用 2 条 → 重建 12KB APK → 验签通过 → 回读 2/2，10 秒上下。
 
 真实包实测（`X-提权者-1.57`，5.4MB / 151 smali）：未打补丁直接重建 → 5.39MB，
 `apktool b` + 对齐 + 签名 + 验签共 7.3 秒；`aapt2 dump badging` 仍能读出
