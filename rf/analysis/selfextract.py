@@ -240,3 +240,44 @@ def _walk(blob: bytes, name: str, res: UnpackResult, depth: int,
                                  elfscan.describe(extra), depth + 2))
         else:
             res.add(Artifact("elf", tag, sub, elfscan.describe(info), depth))
+
+
+# ---------------------------------------------------------------------------
+# 反向：把 payload 重新拼回「能直接 sh 跑」的自解压脚本
+# ---------------------------------------------------------------------------
+def rebuild_makeself(orig: bytes, payload_plain: bytes | None = None) -> tuple[bytes, str]:
+    """
+    只重写数据段，头一个字不动 —— 出来的还是原来那种 .sh。
+
+        orig           原始 .sh 全部字节
+        payload_plain  改过的解压后 payload；None = 不改，原压缩流直通
+
+    为什么默认不重压：gzip 重压会改 mtime/XFL，某些 makeself 头里带
+    大小/CRC 校验，字节一变动就会在手机上 "Cannot decompress"。
+    没改动就直通，能保证与原件 1:1。
+    """
+    ms = parse_makeself(orig)
+    if not ms:
+        raise ValueError("不是 makeself 自解压脚本，不能按原结构重建")
+    head = orig[:ms["offset"]]
+    old_gz = orig[ms["offset"]:]
+    if payload_plain is None:
+        return head + old_gz, f"payload 未改动，压缩流直通（{len(old_gz):,}B）"
+    import gzip as _gz
+    new_gz = _gz.compress(payload_plain, 9)
+    return (head + new_gz,
+            f"payload 已重压：{len(payload_plain):,}B → {len(new_gz):,}B")
+
+
+def verify_makeself(blob: bytes) -> tuple[bool, str]:
+    """成品自检：头还能解析 + 数据段还是能解的 gzip + 行数对得上。"""
+    ms = parse_makeself(blob)
+    if not ms:
+        return False, "头部结构没通过（skip / tail 找不到）"
+    import gzip as _gz
+    try:
+        plain = _gz.decompress(blob[ms["offset"]:])
+    except Exception as e:                                  # noqa: BLE001
+        return False, f"数据段解不开：{e}"
+    return True, (f"结构完好：头 {ms['offset']}B（skip={ms['skip']}），"
+                  f"数据段解压出 {len(plain):,}B")

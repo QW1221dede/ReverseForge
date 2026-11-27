@@ -1010,6 +1010,64 @@ class Api:
         notes.append(f"报告 → {rep}")
         return res
 
+    # =================== 按原类型重建成品（进什么出什么） ===================
+    _OUT_ARCHIVE = ("zip", "jar", "7z", "rar", "iso", "tar", "tgz", "gzip",
+                    "bzip2", "xz", "zst", "lz4", "cab", "wim", "msi", "dmg",
+                    "squashfs", "ar", "rpm", "apk", "ipa", "aab", "apks",
+                    "xapk", "war", "ear", "whl", "egg", "epub", "docx",
+                    "xlsx", "pptx", "odt", "ods", "odp", "msix", "appx")
+
+    def repack_any(self, target: str | Path, out: str | Path,
+                   patched_payload: bytes | None = None) -> dict:
+        """
+        把成品按**原类型**重建：进去是 .sh，出来还是能直接 sh 跑的 .sh；
+        进去是程序/脚本，出来还是同后缀的单文件。
+
+            rf.repack_any("a.sh", "out/a_已处理.sh")
+            rf.repack_any("a.sh", "out/a_已处理.sh", patched_payload=新payload)
+            rf.repack_any("a.zip", "out/a_已处理.zip")     # 归档得自己在外层压
+
+        返回 {path, kind, method, ok, note}。归档类的实际打包不在这里做
+        （要压的是解包目录），脚本里自行 zip/tar —— 这里只管「单文件保真」。
+        """
+        from .analysis import selfextract as sxmod
+
+        p = self._need_file(target)
+        kind = ftmod.sniff(p)
+        dst = Path(out)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        size = p.stat().st_size
+        data = p.read_bytes() if size <= (256 << 20) else b""
+        notes: list[str] = []
+
+        # ---- makeself 自解压脚本：保留原头，只处理数据段 ----
+        ms = sxmod.parse_makeself(data) if data else None
+        if ms and ms.get("comp") == "gzip":
+            blob, how = sxmod.rebuild_makeself(data, patched_payload)
+            dst.write_bytes(blob)
+            ok, chk = sxmod.verify_makeself(dst.read_bytes())
+            notes.append(f"头 {ms['offset']}B 原样保留（skip={ms['skip']}），"
+                         "手机端仍按 `tail -n +skip | gzip -cd` 解")
+            notes.append(chk)
+            if not ok:
+                raise RfError("重建后的 .sh 自检没过：" + chk)
+            self.log(f"  ✓ 成品 .sh 重建：{dst.name}（{how}）")
+            return {"path": str(dst), "kind": "makeself 自解压脚本（.sh）",
+                    "method": how, "ok": ok, "note": "；".join(notes)}
+
+        # ---- 归档类：提示调用方去压目录，这里只返回类型 ----
+        if kind.real in self._OUT_ARCHIVE:
+            return {"path": "", "kind": f"归档（{kind.real}）", "method": "需按归档打包",
+                    "ok": False,
+                    "note": "归档类成品请把解包目录重新压成同族压缩包"}
+
+        # ---- 其余单文件：原样复制，后缀保持 ----
+        shutil.copy2(p, dst)
+        self.log(f"  ✓ 成品单文件复制：{dst.name}（{kind.label}）")
+        return {"path": str(dst), "kind": kind.label,
+                "method": "原样复制（后缀与类型保持）", "ok": dst.exists(),
+                "note": "单文件样本无需重打包"}
+
     def carve(self, path: str | Path, out: str | Path | None = None) -> dict:
         """
         内嵌对象雕刻：不依赖文件头在偏移 0，直接扫字节流里的
@@ -1125,10 +1183,22 @@ class Api:
         return rep
 
     def decrypt_save(self, rep, out_dir: str | Path | None = None,
-                     limit: int = 5) -> list[Path]:
-        """把试解结果落盘（前几个候选各存一份，方便打开看）。"""
+                     limit: int = 5, min_score: int = 0) -> list[Path]:
+        """
+        把试解结果落盘（前几个候选各存一份，方便打开看）。
+
+        min_score 用来挡掉低分噪音 —— 1791B 的 Caesar/XOR「解出」一段
+        大概是原文明文头的东西，分数不高但会挤满目录，默认不挡（0）。
+        """
         od = Path(out_dir) if out_dir else self.out_dir / "decrypted"
-        files = decauto.save_hits(rep, od, limit=limit)
+        hits = [h for h in getattr(rep, "hits", [])
+                if getattr(h, "score", 0) >= int(min_score)]
+        files: list[Path] = []
+        for h in hits[:limit]:
+            try:
+                files.append(h.save(od))
+            except Exception as e:                          # noqa: BLE001
+                self.log(f"  ! 落盘失败：{e}")
         for f in files:
             self.log(f"  → {f}")
         return files

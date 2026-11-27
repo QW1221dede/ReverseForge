@@ -212,6 +212,54 @@ def _preview(out: bytes, n: int = 60) -> str:
     return t[:n]
 
 
+# 判断"解出来像不像真文本"用的常用词表（英文 + 代码关键字）。
+# 只收高频、几乎不会在位移乱码里凑巧出现的词。
+_WORDS = frozenset("""
+the and for you not with this that from have will are was were been into only
+such some more most other about after before again against because while where
+when what which who whom whose there their them then than how all any both each
+few many nor off own same too very can just should now
+if then else elif fi do done case esac echo exit return local export function
+print printf true false none null void int char long float double class public
+private static final import package android http https json error failed
+success license key token user pass password file path data name value type
+build test start stop load save read write open close main init begin end
+""".split())
+
+
+def _plausible_text(b: bytes) -> bool:
+    """
+    "全是可打印字符"根本不等于"解对了" —— 把一段明文 shell 头做凯撒位移，
+    结果还是全可打印，打分能拿 80，目录里就多出一堆 1.7KB 的垃圾。
+
+    这里对**看起来像纯文本**的结果再审一道：必须真的出现常用词
+    （英文/代码关键字/中文）。二进制、结构化容器（ZIP/ELF/JSON 开头）
+    不归它管，直接放行。
+    """
+    if not b:
+        return False
+    head = b[:4096]
+    if head[:1] in (b"{", b"[", b"PK", b"\x7f"):
+        return True                                  # 结构化，交给魔数/JSON 判据
+    try:
+        if C.printable(head) < 0.92:
+            return True                              # 不像纯文本，不拦
+    except Exception:                                # noqa: BLE001
+        return True
+    try:
+        t = head.decode("utf-8")
+    except UnicodeDecodeError:
+        t = head.decode("latin1", "ignore")
+    cjk = sum(1 for ch in t if "\u4e00" <= ch <= "\u9fff")
+    if cjk >= 4:
+        return True
+    toks = re.findall(r"[A-Za-z]{2,24}", t)
+    if len(toks) < 8:
+        return True                                  # 太短，证据不足，不拦
+    hit = sum(1 for w in toks if w.lower() in _WORDS)
+    return hit / len(toks) >= 0.06
+
+
 def _worth_unwrap(out: bytes) -> bool:
     """剥掉一层之后，值不值得继续往下剥（避免对纯随机数据反复解）。"""
     if not out or len(out) < 4:
@@ -459,6 +507,8 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             for h in sub.hits:
                 if not h.out or score_output(h.out) < 45:
                     continue
+                if not _plausible_text(h.out):
+                    continue
                 full = data[:seg.split.head_end] + h.out
                 add(f"{bhow}·独立试解→{h.method}", full, seg.split.head_end,
                     key=h.key, note=f"{bhow}单独跑（避免明文头稀释打分）",
@@ -470,10 +520,10 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             continue
         chunk = data[off:off + 64 * 1024]
         for name, dec in (("ROT13", C.rot(chunk, 13)), ("Atbash", C.atbash(chunk))):
-            if score_output(dec) >= 55:
+            if score_output(dec) >= 55 and _plausible_text(dec):
                 add(f"{name}·偏移{off}", data[:off] + dec, off, note=name)
         for shift, dec in C.caesar_all(chunk, top=3):
-            if score_output(dec) >= 55:
+            if score_output(dec) >= 55 and _plausible_text(dec):
                 add(f"Caesar+{shift}·偏移{off}", data[:off] + dec, off, note="凯撒位移")
 
     # ---- 2) 单字节 XOR ----

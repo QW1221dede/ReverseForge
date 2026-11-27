@@ -64,10 +64,22 @@ def safe_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")[:80] or "output"
 
 
+def split_ext(name: str) -> tuple[str, str]:
+    """把文件名拆成 (主体, 完整后缀)。.tar.gz / .7z.001 这类多段后缀整体算后缀。
+
+    不用 Path(name).stem / .suffix —— 那只会认最后一段，
+    重名编号时会把 foo.tar.gz 变成 foo.tar_2.gz。
+    """
+    n = Path(name).name
+    for i, ch in enumerate(n):
+        if ch == "." and i > 0:
+            return n[:i], n[i:]
+    return n, ""
+
+
 def unique_path(directory: Path, name: str) -> Path:
-    """同名不覆盖，自动加 _2 / _3。"""
-    base = Path(name).stem
-    ext = Path(name).suffix or ".apk"
+    """同名不覆盖，自动加 _2 / _3。后缀必须跟传进来的完全一致，绝不替换。"""
+    base, ext = split_ext(name)
     p = directory / name
     i = 2
     while p.exists():
@@ -80,13 +92,17 @@ def drop_to_desktop(src: str | Path, name: str = "",
                     *, tag: str = "已绕过") -> tuple[Path, str]:
     """
     复制成品到桌面。返回 (桌面路径, 说明)。
-    用 copy 而不是 move —— 产物目录里那份要留着做报告/回滚。
+
+    后缀跟成品本身走：成品是 .zip 就落 .zip，是 .elf 就落 .elf，
+    绝不再一律改成 .apk（之前那版把非 APK 样本全变成假 APK，装不上也打不开）。
+    name 只给「主体名」，不带后缀。
     """
     s = Path(src)
     if not s.exists():
         raise RuntimeError(f"成品不存在：{s}")
     desk = desktop_dir()
-    stem = safe_name(Path(name).stem if name else s.stem)
-    out = unique_path(desk, f"{stem}_{tag}.apk")
+    stem = safe_name(Path(name).stem if name else split_ext(s.name)[0])
+    _, ext = split_ext(s.name)          # 真实后缀，可能为空（无后缀文件）
+    out = unique_path(desk, f"{stem}_{tag}{ext}")
     shutil.copy2(s, out)
     return out, f"✓ 已复制到桌面：{out.name}"
