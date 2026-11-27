@@ -236,15 +236,23 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     ordered = K.ordered_keys(cands, with_common=True, limit=80)
 
     hits: list[Hit] = []
+    near: list[Hit] = []          # 35-44 分的"差一点"片段：整体没救时至少留个抓手
     seen: set[str] = set()
 
     def add(method: str, out: bytes, offset: int, key: str = "", note: str = "") -> None:
-        nonlocal hits
+        nonlocal hits, near
         rep.tried += 1
         if not out or len(out) < 4:
             return
         sc = score_output(out)
         if sc < 45:
+            if sc >= 35:
+                h = hashlib.sha256(out[:8192]).hexdigest()[:16]
+                if h not in seen:
+                    seen.add(h)
+                    near.append(Hit(method=method + "（低分片段）", offset=offset,
+                                    score=sc, out=out, preview=_preview(out),
+                                    key=key, note=note or "接近可读但没过线"))
             return
         h = hashlib.sha256(out[:8192]).hexdigest()[:16]
         if h in seen:
@@ -280,6 +288,14 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         layer = nxt[:6]
         if not layer:
             break
+    # 剥出来的层往往就是配置/源码（json/yaml/xml），里面藏着真密钥 ——
+    # 不回头捞一遍，后面 80 个候选全是白撞
+    for label, blob, _off in layer[:6]:
+        extra = K.from_bytes(blob[:512 * 1024], source=f"解码层·{label}")
+        if extra:
+            cands = K.merge(cands, extra, limit=200)
+    ordered = K.ordered_keys(cands, with_common=True, limit=80)
+    rep.keys_used = len(cands)
     for off in body_offsets[:8]:
         if off <= 0:
             continue
@@ -348,6 +364,20 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         if dec:
             full = C.xor_bytes(data, raw)
             add(f"密钥 XOR（{_ks(val)}）", full, 0, key=val, note=src)
+            # 相位自适应：密钥流在密文里是从中间某处开始循环的，
+            # 相位差一位就全盘皆输 —— 样本接近可读但没过线时，把所有相位都试一遍
+            sc0 = score_output(dec)
+            if 28 <= sc0 < 45 and 2 <= len(raw) <= 64:
+                best_ph, best_out = -1, b""
+                for ph in range(1, len(raw)):
+                    rot = raw[ph:] + raw[:ph]
+                    d = C.xor_bytes(sample, rot)
+                    if score_output(d) > max(sc0, 0) + 8:
+                        best_ph, best_out = ph, d
+                if best_ph >= 0:
+                    add(f"密钥 XOR（{_ks(val)} · 相位+{best_ph}）",
+                        C.xor_bytes(data, raw[best_ph:] + raw[:best_ph]), 0,
+                        key=val, note=f"{src}·相位对齐")
 
         if len(raw) >= 4 and tried_keys <= 40:
             rc = C.rc4(data, raw)
@@ -441,6 +471,68 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
                 if off > 32 and not hits:
                     pass
 
+    # ---- 10) 片段自动拼接：整体撞不开 ≠ 没救 ----
+    #   混合加密（前半 XOR、后半 RC4 / 分段不同密钥 / 中间垫了明文段）时，
+    #   整文件任何单一算法都过不了线。做法：切成块，每块独立把
+    #   「单字节 XOR / 循环 XOR / 候选密钥 XOR」全试一遍，各块取最高分，
+    #   高分块用解密结果、低分块保留原文，拼成一份完整明文。
+    best_sc = max((h.score for h in hits), default=0)
+    if best_sc < 62 and len(data) >= 4096 and time.time() < deadline:
+        try:
+            WIN = 8192
+            body = data[seg.split.head_end:] if seg.split.found else data
+            head_len = len(data) - len(body)
+            blocks: list[bytes] = []
+            for i in range(0, len(body) - 1023, WIN):
+                blocks.append(body[i:i + WIN])
+            if len(blocks) >= 2 and len(blocks) <= 4096:
+                # 每块的候选密钥：全局候选 + 该块自己的循环XOR破解
+                cand_keys: list[bytes] = []
+                for val, _src, _sc in ordered[:24]:
+                    kb = val.encode("utf-8", "ignore")
+                    if len(kb) >= 2:
+                        cand_keys.append(kb)
+                stitched: list[bytes] = []
+                good = 0
+                for bi, blk in enumerate(blocks):
+                    if time.time() > deadline:
+                        stitched.append(blk)
+                        continue
+                    best_blk = (0, blk)
+                    # 单字节 XOR
+                    for k, _sc, dec in C.xor_single_bruteforce(blk[:16384], top=2):
+                        if k and dec:
+                            s = score_output(dec)
+                            if s > best_blk[0]:
+                                best_blk = (s, dec)
+                    # 循环 XOR（块内破解）
+                    ksizes = C.xor_keysize_hamming(blk[:16384], max_key=32)[:3]
+                    for klen, _d in ksizes:
+                        dec, rkey = C.xor_break_repeating(blk, klen)
+                        if dec and rkey:
+                            s = score_output(dec)
+                            if s > best_blk[0]:
+                                best_blk = (s, dec)
+                    # 候选密钥 XOR
+                    for kb in cand_keys[:16]:
+                        dec = C.xor_bytes(blk, kb)
+                        s = score_output(dec)
+                        if s > best_blk[0]:
+                            best_blk = (s, dec)
+                    if best_blk[0] >= 40:
+                        good += 1
+                    stitched.append(best_blk[1])
+                if good >= max(2, len(blocks) // 2):
+                    merged = (data[:head_len] + b"".join(stitched))
+                    sc_all = score_output(merged[:65536])
+                    if sc_all >= 45:
+                        add(f"片段拼接（{good}/{len(blocks)} 块解出）",
+                            merged, 0, note="分块独立破解后自动拼接")
+                        rep.notes.append(
+                            f"拼接：{len(blocks)} 块里 {good} 块独立解出并拼合")
+        except Exception as e:                              # noqa: BLE001
+            rep.notes.append(f"拼接跳过：{e}")
+
     # ---- 收尾：排序、全文重解校验 ----
     hits.sort(key=lambda h: -h.score)
     # 只对前几个做全文重解，避免在大文件上浪费时间
@@ -450,8 +542,15 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         rep.notes.append(f"到时间预算（{budget:.0f}s）就停了，结果可能不全；"
                          f"用 deep=True 跑更久")
     if not rep.hits:
-        rep.notes.append("常见算法全试过没命中。下一步：从程序里找解密函数"
-                         "（rf.patch_scan / rf.auth_scan），或 hook 拿明文")
+        if near:
+            near.sort(key=lambda h: -h.score)
+            rep.hits = near[:top]
+            rep.notes.append("没有完整命中，只有低分片段（已列出最接近的）："
+                             "可能是偏移不对/加密模式变体 —— 试着把片段里的"
+                             "可读部分当 crib 再跑，或提供已知密钥")
+        else:
+            rep.notes.append("常见算法全试过没命中。下一步：从程序里找解密函数"
+                             "（rf.patch_scan / rf.auth_scan），或 hook 拿明文")
     return rep
 
 
