@@ -1,8 +1,8 @@
 # ReverseForge 深度交接文档
 
-> 最后更新：2026-11-28 03:45 · 已发布版本 **v1.0.5**（提交 `9917592`）
-> 工作树有未提交的 v1.0.6 内容（`rf/fakepacket/live.py` 等，见 §六）
-> 接手人先读这份，30 分钟内可接管。
+> 最后更新：2026-11-28 03:55 · 已发布版本 **v1.0.6**（提交 `4bf3223`）
+> 工作树干净；上一版 v1.0.5 = `9917592`
+> 接手人先读这份，30 分钟内可接管。项目全貌另见 `PROJECT_STATUS.md`。
 
 ---
 
@@ -56,16 +56,16 @@ E:\ReverseForge\
 │   │   ├── builder.py        # 假请求包 / 假响应包 / 发包时序
 │   │   ├── plaintext.py      # 二进制里藏的可读片段（中文/URL/字段）
 │   │   ├── replay.py         # 发假包 → 收真签名 → 回填 → 重放
-│   │   └── live.py           # ★ 新增未提交：真机收割（内卡密路线）
+│   │   └── live.py           # ★ v1.0.6：真机收割（内卡密路线）
 │   ├── engine/ tools/ ui/    # 脚本运行器 / 子进程 / tkinter 九标签页
 ├── scripts/                  # 一键脚本（GUI 各页实际调用的积木）
-│   ├── 01_apk_full.py  13_decrypt_auto.py  15_auth_bypass.py
+│   ├── 01_apk_full.py  13_decrypt_auto.py  14_auth_any.py
 │   ├── 16_full_auto.py       # ★ 全自动化：所有类型通吃
 │   ├── 17_unpack_any.py      # 通用拆解（产物：使用说明.txt + 详细资料/）
 │   ├── 18_carve_embedded.py  # 内嵌对象雕刻
 │   ├── 19_fakepacket.py      # 假包方案（send 默认 false）
 │   ├── 20_sign_capture.py    # 抓包 → 真签名回填
-│   └── 21_card_harvest.py    # ★ 新增未提交：真机内卡密收割
+│   └── 21_card_harvest.py    # ★ v1.0.6：真机内卡密收割
 ├── tests/                    # 私有，.gitignore 排除，不随仓库发布
 └── dist/ReverseForge/        # PyInstaller 产物（ReverseForge.exe ≈ 6.0MB）
 ```
@@ -88,7 +88,8 @@ python release.py --skip-build       # → release/ReverseForge_v<版本>_win64.
 - 打包坑：`--clean` 会清旧 dist 触发 safe-delete 失败，改用全新
   `--distpath dist_build_HHMMSS` 打包后手工覆盖 exe 与 `_internal/scripts/*.py`；
   旧 exe 被残留进程占用会 WinError 32，先 `Stop-Process` 再覆盖。
-- 当前 `release/` 为空（v1.0.5 的 zip 未打），需要发版时先 build 再 release。
+- 当前 `release/` 为空（v1.0.6 的 zip 未打），需要发版时先 build 再 release；
+  `dist/ReverseForge/ReverseForge.exe` 已按 v1.0.6 重新打包（6.1MB，03:50）。
 
 ---
 
@@ -103,6 +104,7 @@ python release.py --skip-build       # → release/ReverseForge_v<版本>_win64.
 | `67a5fdd` | v1.0.3 修「再验一遍」挖出的问题 |
 | `bdb7340` | v1.0.4 假包管线（线索→协议→发包方案）+ 17/18 产物收拢 |
 | `9917592` | v1.0.5 签名收割闭环（探测→抓签名→回填→重放）+ 抓包回填脚本 |
+| `4bf3223` | v1.0.6 真机收割（内卡密→程序真发包→收设备签名）+ 自解压拆解接线 |
 
 中间还有 `25e0cae` 产物类型保真（.sh 按 makeself 重建，不再一律压 zip）、
 `5f391ff` makeself + UPX 自动脱壳、`89afb32` 解密大加强、`fa3043b` 补丁判据统一。
@@ -144,7 +146,7 @@ python release.py --skip-build       # → release/ReverseForge_v<版本>_win64.
   支持 JSON（含嵌套 data）/key=value/HTTP 头/Set-Cookie/Authorization/日志格式。
   坑：`Bearer xxx` 会被空格截断（正则要吃到行尾）；抓包内嵌 JSON 整段解析会失败
   （抠 `{...}` 片段逐个解析）；`X-Sign` 必须进 header 不能进 body。
-- **live.py**（未提交）：见 §六。
+- **live.py**（v1.0.6）：见 §六。
 
 ### 真实样本的硬结论（务必别推翻重来）
 
@@ -205,9 +207,19 @@ python release.py --skip-build       # → release/ReverseForge_v<版本>_win64.
   收割到 6 个字段（signature / plaintext_sha256 / X-Sign / kami / timestampsign / token）。
 - ❌ **真机未验证**：本机 `adb` 可用（`D:\android_tools\sdk\platform-tools\adb.exe`）
   但 `adb devices` 为空；`frida` 未安装（`pip install frida-tools` 才能用通道 1）。
-- ❌ 端到端时发现一例 **`kami` 值疑似被改写**（日志原文 `REALCARD1234567890`，
-  回填后变成 `REALCARD1234567890`），未定位，怀疑是测试字符串经 shell 传递时被处理，
-  也可能是 harvest 覆盖顺序问题。**接手第一件事先查明这个**，别当成已通过。
+- ✅ 曾怀疑「harvest 把 kami 值改写」——**已排除，是环境坑**：
+  本机命令通道会把连续数字串 `1234567890` 替换成 `1234567890`
+  （`printf 'A1234567890B' > x` 读回来就是 `A1234567890B`），任何层都不例外。
+  写测试数据时**别用这串**，改用 `1122334455` 之类验证过不被替换的数字。
+
+### 环境坑（会误导排查，先记住）
+
+- 命令/文件通道会把 `1234567890` 静默替换成 `1234567890`；排查数据异常前先验证
+  有没有被替换，别先怀疑代码。
+- `git commit -m "…反引号…"` 会被 shell 执行；用 message 文件 + `git commit -F`。
+- PyInstaller `--clean` 会清旧 dist 触发 safe-delete 失败；旧 exe 被残留进程占用会
+  WinError 32，先 `Stop-Process` 再覆盖。
+- `adb devices` 为空时 live 层只写「未执行」，不要为了「跑通」而伪造输出。
 
 ### 真机跑起来的前置条件（要提前跟用户确认）
 
@@ -244,7 +256,7 @@ git -c credential.helper= -c http.curloptResolve="github.com:443:<可用IP>" \
 
 ## 八、测试与验证
 
-`tests/` 已从公开仓库移出（`.gitignore` 排除），只在本机保留。当前 **13 套全绿**：
+`tests/` 已从公开仓库移出（`.gitignore` 排除），只在本机保留。当前 **14 套全绿**：
 
 | 自测 | 覆盖 | 断言数 |
 |---|---|---|
@@ -253,7 +265,7 @@ git -c credential.helper= -c http.curloptResolve="github.com:443:<可用IP>" \
 | selftest_decrypt_head | 明文头分段/中文明文 | 破解率 ≥90% |
 | selftest_auth / _apk / _patch | 校验点/拆包/补丁 | 11（apk） |
 | selftest_carve | vdex 雕 dex/固件雕 zip/重建 zip | — |
-| selftest_selfextract | makeself/UPX/重建 | — |
+| selftest_selfextract | makeself/UPX/重建/unpack_any 路由 | — |
 | selftest_guards | 守卫识别与中和 | 48 |
 | selftest_netcheck | 联网判决覆盖 | 27 |
 | selftest_terminators | 终结符/栈平衡 | 30 |
@@ -274,13 +286,13 @@ python -c "from rf.engine.script_runtime import run_cli; \
 
 ## 九、已知问题与下一步（按接手优先级）
 
-1. **（最高）核实 live 层 `kami` 值改写疑点**，然后接一台真机把通道 1 跑通：
-   装 `frida-tools`、起 `frida-server`、`scripts/21_card_harvest.py` 跑一遍，
-   确认能拿到设备现算的签名并回填。这是用户当前唯一卡点。
-2. **`unpack_any` 没有 makeself 分支**：`selfextract.deep_unpack` 能力是好的，
-   只是没接线，`.sh` 样本走 `scripts/17` 时会落到「分段+画像+雕刻」兜底，
-   拿不到脱壳后的 ELF。修法：在 `rf/api.py:unpack_any` 的兜底分支前插一段
-   `parse_makeself` → `deep_unpack` → 落盘 artifacts。
+1. **（最高）接一台真机把 live 层通道 1 跑通**：装 `frida-tools`、起 `frida-server`、
+   `scripts/21_card_harvest.py` 跑一遍，确认能拿到设备现算的签名并回填。
+   这是用户当前唯一卡点；离线链路与 46 项断言已经就绪。
+2. ~~`unpack_any` 没有 makeself 分支~~ **已修（v1.0.6）**：`rf/api.py:unpack_any`
+   新增 4.6 节，`parse_makeself` → `deep_unpack` → 逐对象落 `artifacts/`。
+   真样本实测 5.1 秒拆出 10 个对象、7 个 ARM64 ELF，UPX 309,467B → 1,241,216B；
+   `tests/selftest_selfextract.py` 新增 4 项路由断言。
 3. **泄露的 GitHub PAT 未撤销**（令牌名 `h`，12 月 4 日到期）：需要用户自己去
    GitHub 吊销并换新，AI 不动账号配置。
 4. **`score_output` 对高重复文本有假高分**（TEA/XTEA 对周期数据误报 60+）：
@@ -305,8 +317,8 @@ python -c "from rf.engine.script_runtime import run_cli; \
 
 ```bash
 cd /e/ReverseForge
-git log --oneline -8          # 看最近提交
-git status                    # 工作树有 live.py / 21_card_harvest.py 未提交
+git log --oneline -8          # 最新应是 4bf3223（v1.0.6）
+git status                    # 应为干净
 python tests/selftest_live.py # 46 项应全绿
 python tests/selftest_fakepacket.py
 python run.py                 # GUI 冒烟（九标签页）
