@@ -234,7 +234,7 @@ python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 
 ---
 
-## 三、十四个内置脚本
+## 三、二十个内置脚本
 
 | 脚本 | 干什么 | 典型耗时 |
 |---|---|---|
@@ -257,6 +257,7 @@ python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 | `18_carve_embedded.py` | **内嵌对象雕刻**：挖 zip/dex/so/图片，产物收进 `详细资料/` | 视大小 |
 | `19_fakepacket.py` | **假包方案**：解密出的片段自动串线索 → 判协议 → 造假请求/假响应/发包时序 + 明文线索图 | 秒级 |
 | `20_sign_capture.py` | **真签名回填**：从手机抓包里收割服务器认的真签名 → 回填假包 → 直接发包 | 秒级 |
+| `21_card_harvest.py` | **真机内卡密收割**：用破解版自带卡密让程序真跑一次，frida 抓设备现算的签名并让它替你签 | 30 秒级（需真机） |
 
 ### 假包：服务器验证怎么骗
 
@@ -284,6 +285,14 @@ python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 **20 号脚本**：把手机上抓到的验证请求/响应（har/xlog/cURL/日志都行）喂进去，
 它收割签名后产出 `已签名请求包.json` + `已签名请求头.json`（`X-Sign` / `Authorization`
 这类头字段会正确放进请求头，不塞进 JSON body），拿去直接发包。
+
+**没有真机怎么办（21 号）**：签名既然是设备私钥现算的，那就让能通过验证的程序
+自己跑一次 —— 用破解版内置的有效卡密把程序启动起来，frida 挂在旁边：
+hook `OkHttp`/`HttpURLConnection` 收它的请求与响应，hook `Signature.initSign`
+拿到设备私钥引用、用 `rpc.exports.sign()` 让它替任意明文签名。挖卡密、写
+`/data/local/tmp/dfm.card`、起进程、解析日志全在一条链里，产出还是
+`已签名请求包.json`。没设备或没装 frida 时会如实写「未执行」，不会假装成功；
+手上只有抓包文件时用 `capture` 参数，纯离线也能收割。
 
 ---
 

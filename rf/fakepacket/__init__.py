@@ -19,6 +19,9 @@
                  ① 请求假包（发给服务器，骗它当成合法验证）
                  ② 响应假包（本地伪造服务器回包，骗客户端）
                  ③ 时序脚本（启动时发 / 心跳定期发）
+    replay    —— 发假包 → 从响应抓真签名 → 回填 → 用真签名重发
+    live      —— 真机收割：内卡密注入 → 程序真发包 → frida 抓设备现算的签名
+                 （签名在设备私钥里，样本里没有，静态造不出来）
     report    —— 线索表 + 方案表 + 可直接执行的发包脚本
 
 脚本里通常只用一个：
@@ -36,6 +39,11 @@ from .report import report_md
 from .plaintext import PlaintextMap, build as plaintext_map
 from .replay import (ReplayReport, Harvest, replay, render_replay_script,
                      _extract_signatures, capture_signatures)
+from .live import (CardKey, find_cards, pick_card, guess_package,
+                   LiveCapture, LiveReport, SigPair,
+                   parse_log, harvest, merge_into_body, run_live,
+                   install_card, launch, devices, hook_js,
+                   render_live_script)
 
 __all__ = [
     "Clue", "ClueChain", "extract",
@@ -45,4 +53,8 @@ __all__ = [
     "PlaintextMap", "plaintext_map",
     "ReplayReport", "Harvest", "replay", "render_replay_script",
     "_extract_signatures", "capture_signatures",
+    "CardKey", "find_cards", "pick_card", "guess_package",
+    "LiveCapture", "LiveReport", "SigPair",
+    "parse_log", "harvest", "merge_into_body", "run_live",
+    "install_card", "launch", "devices", "hook_js", "render_live_script",
 ]

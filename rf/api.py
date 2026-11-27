@@ -63,6 +63,11 @@ from .fakepacket import render_script as fp_script, report_md as fp_report
 from .fakepacket import plaintext_map as fp_plaintext
 from .fakepacket import replay as fp_replay, render_replay_script as fp_replay_script
 from .fakepacket import capture_signatures as fp_capture
+from .fakepacket import (find_cards as fp_find_cards,
+                         guess_package as fp_guess_package,
+                         run_live as fp_run_live,
+                         merge_into_body as fp_merge_sigs,
+                         render_live_script as fp_live_script)
 from .patch import checkpoints as cpmod
 from .patch import engine as patchmod
 from .patch import netcheck as netmod
@@ -1040,6 +1045,45 @@ class Api:
             except Exception as e:                                  # noqa: BLE001
                 notes.append(f"雕刻失败：{e}")
 
+        # ---- 4.6) 自解压脚本（makeself）：解数据段 → 压缩流 → UPX 脱壳 ----
+        # 这类样本（.sh/.run）外壳是 shell，真正的东西在第 N 行之后的 gzip 流里。
+        # 通用解压拆不开，必须按 makeself 头精确切，再逐层脱壳。
+        if real in ("sh", "bash", "run") or p.suffix.lower() in (".sh", ".run", ".self"):
+            try:
+                from .analysis import selfextract as sxmod
+                size = p.stat().st_size
+                data = p.read_bytes() if size <= (512 << 20) else b""
+                ms = sxmod.parse_makeself(data) if data else None
+            except OSError:
+                ms = None
+            except Exception:                                       # noqa: BLE001
+                ms = None
+            if ms:
+                self.ctx.step("拆自解压（makeself）", 45)
+                res["method"] = (f"自解压拆解（makeself skip={ms['skip']}，"
+                                 f"数据段 @{ms['offset']}B，{ms['comp']}）")
+                up = sxmod.deep_unpack(data, p.name, max_depth=3)
+                art = dst / "artifacts"
+                art.mkdir(parents=True, exist_ok=True)
+                import re as _re
+                n = 0
+                for i, a in enumerate(up.artifacts):
+                    safe = _re.sub(r"[^\w.\-]+", "_", a.name)[:80] or "obj"
+                    (art / f"{i:02d}_d{a.depth}_{a.kind}_{safe}").write_bytes(a.data)
+                    n += 1
+                for note in up.notes[:20]:
+                    notes.append(note)
+                res["files"] = n
+                elf = [a for a in up.artifacts if a.kind in ("elf", "upx")]
+                if elf:
+                    notes.append("已脱壳出 ELF：" + "、".join(
+                        f"{a.name}({a.size:,}B)" for a in elf[:4])
+                        + " → artifacts/（可直接丢「ELF 画像」）")
+                notes.append(f"共 {n} 个对象 → artifacts/（含 makeself 原始 payload）")
+                self.log(f"  ✓ 自解压拆解：{n} 个对象，"
+                         f"{'含脱壳 ELF' if elf else '未发现 ELF'}")
+                return res
+
         # ---- 5) 兜底：分段 + 画像 + 内嵌对象雕刻 ----
         res["method"] = "分段 + 画像 + 内嵌雕刻（该类型没有容器结构可拆）"
         notes.append("已产出：分段图 / 熵分布 / 字符串画像；"
@@ -1416,6 +1460,76 @@ class Api:
                                 if sigs else "没抓到签名字段")
                              + "\n\n已回填到请求体，可用「已签名请求包.json」直接发包。\n")
         self.log(f"从抓包收割 {len(sigs)} 个签名字段，已回填")
+        return result
+
+    # ========== 真机收割：内卡密 → 程序真发包 → 收设备签名 ==========
+    def fakepacket_live(self, target: str | Path, *, serial: str = "",
+                        package: str = "", card: str = "",
+                        seconds: int = 25, capture_log: str | Path | None = None,
+                        out_dir: str | Path | None = None) -> dict:
+        """没有真机验证的解法：让能通过验证的程序自己发一次包，把真签名收回来。
+
+        流程（对应「破解版内卡密」路线）：
+            挖内卡密 → 写进设备缓存 → frida 注入 → 启动应用 → 抓请求/签名
+            → 回填假包 → 落「已签名请求包.json」+ 独立收割脚本
+
+        没有设备 / 没有 frida 时逐条写清原因，不冒充成功。
+        """
+        p = self._need_path(target)
+        self.ctx.step("先跑假包管线", 15)
+        result = self.fakepacket_build(p)
+        protos = result.get("protocols") or []
+
+        self.ctx.step("找内卡密", 35)
+        cards = fp_find_cards(p) if not card else []
+        use_card = card or (cards[0].value if cards else "")
+        pkg = package or fp_guess_package(p)
+        if cards:
+            self.log(f"候选内卡密 {len(cards)} 条：")
+            for c in cards[:6]:
+                self.log("  " + c.row())
+        self.log(f"包名：{pkg or '（没猜到，请手工填 package）'}")
+        self.log(f"用卡密：{use_card[:12] + '…' if len(use_card) > 12 else use_card or '（用设备已有授权）'}")
+
+        self.ctx.step("真机跑一轮", 60)
+        rep = fp_run_live(serial, pkg, use_card, seconds=seconds,
+                          log_file=capture_log)
+        self.log(rep.table())
+
+        sigs = rep.harvested
+        body = dict(result.get("body") or {})
+        body, headers = fp_merge_sigs(body, sigs)
+        result.update({"live": rep, "body": body, "headers": headers,
+                       "captured": sigs, "cards": cards, "package": pkg})
+        if sigs:
+            from .fakepacket import ReplayReport
+            result["replay"] = ReplayReport(
+                url=(protos[0].endpoint if protos else ""),
+                harvested=sigs, final_body=body, ok=True,
+                note="真机收割：设备现算的签名已回填")
+            if protos:
+                result["replay_script"] = fp_replay_script(protos[0], body,
+                                                           headers=headers)
+        result["report"] += ("\n\n## 八、真机收割（内卡密路线）\n\n```\n"
+                             + rep.table() + "\n```\n")
+        if cards:
+            result["report"] += ("\n候选内卡密：\n\n"
+                                 + "\n".join(f"- `{c.value}` （{c.source}）"
+                                             for c in cards[:8]) + "\n")
+        result["live_script"] = fp_live_script(str(p), pkg, use_card, serial)
+
+        if out_dir:
+            od = Path(out_dir)
+            od.mkdir(parents=True, exist_ok=True)
+            (od / "真机收割报告.md").write_text(result["report"], encoding="utf-8")
+            (od / "真机收割.py").write_text(result["live_script"], encoding="utf-8")
+            if sigs:
+                import json as _j
+                (od / "已签名请求包.json").write_text(
+                    _j.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+                (od / "已签名请求头.json").write_text(
+                    _j.dumps(headers, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.log(f"真机收割产物 → {od}")
         return result
 
     def keys_any(self, target: str | Path, limit: int = 120) -> list:
