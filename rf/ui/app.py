@@ -48,6 +48,8 @@ from ..tools import runner
 from ..tools.registry import registry
 from ..engine.script_runtime import ScriptMeta, ScriptRun, discover_scripts, parse_meta
 from . import theme as T
+from .widgets import (CodeBox, FlowFrame, ScrollFrame, install_wheel_routing,
+                      mount_scroll)
 
 APP_TITLE = "ReverseForge · 逆锻台"
 
@@ -91,6 +93,8 @@ class App(_ROOT_BASE):
         self.minsize(1000, 640)
         self.configure(bg=T.BG)
         T.apply(self)
+        # 滚轮统一路由：指针停在容器/留白上也能滚（Tk 自身不冒泡）
+        install_wheel_routing(self)
 
         config.ensure_dirs()
 
@@ -236,17 +240,25 @@ class App(_ROOT_BASE):
 
     # ---------------- 左：脚本 + 参数 ----------------
     def _build_left(self, root: tk.Frame) -> None:
+        # 左栏用 grid 而不是 pack：
+        # pack 在「内容总高 > 可用高」时会把最后排的控件压成 0 高度，参数区就
+        # 只剩十几个像素（看着像「参数没了」）。grid 由权重决定分配，参数行
+        # weight=1 + minsize，窗口再矮也留得下一块能滚动的区域。
+        root.columnconfigure(0, weight=1)
+
         # ---- 文件投放区（拖拽 / 选择）----
         from .dropzone import FileDropZone
 
         self.drop = FileDropZone(root, on_change=self._on_files_changed,
-                                 on_analyze=self._on_files_analyze, height=5)
-        self.drop.pack(fill="x", padx=10, pady=(12, 6))
-        tk.Frame(root, bg=T.BORDER, height=1).pack(fill="x", padx=14, pady=(0, 6))
+                                 on_analyze=self._on_files_analyze, height=1)
+        self.drop.grid(row=0, column=0, sticky="ew", padx=10, pady=(12, 6))
+
+        tk.Frame(root, bg=T.BORDER, height=1).grid(
+            row=1, column=0, sticky="ew", padx=14, pady=(0, 6))
 
         # 标题行
         top = tk.Frame(root, bg=T.PANEL)
-        top.pack(fill="x", padx=14, pady=(2, 6))
+        top.grid(row=2, column=0, sticky="ew", padx=14, pady=(2, 6))
         tk.Label(top, text="脚本库", bg=T.PANEL, fg=T.TEXT,
                  font=T.UI_FONT_B).pack(side="left")
         ttk.Button(top, text="刷新", style="Ghost.TButton",
@@ -254,41 +266,46 @@ class App(_ROOT_BASE):
 
         # 脚本列表
         wrap = tk.Frame(root, bg=T.PANEL)
-        wrap.pack(fill="both", expand=False, padx=10, pady=(0, 8))
+        wrap.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         self.lb = tk.Listbox(
             wrap, bg=T.PANEL2, fg=T.TEXT, selectbackground=T.SEL,
             selectforeground=T.ACCENT, borderwidth=0, highlightthickness=0,
-            font=T.UI_FONT, activestyle="none", height=7,
+            font=T.UI_FONT, activestyle="none", height=4,
             exportselection=False,
         )
         self.lb.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.lb.yview)
-        sb.pack(side="right", fill="y")
-        self.lb.configure(yscrollcommand=sb.set)
+        mount_scroll(self.lb, wrap)
         self.lb.bind("<<ListboxSelect>>", self._on_pick_script)
 
         # 脚本说明
         self.lbl_desc = tk.Label(root, text="", bg=T.PANEL, fg=T.MUTED,
                                  font=T.UI_FONT_S, justify="left", anchor="w",
                                  wraplength=300)
-        self.lbl_desc.pack(fill="x", padx=16, pady=(0, 10))
+        self.lbl_desc.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 10))
 
-        tk.Frame(root, bg=T.BORDER, height=1).pack(fill="x", padx=14)
+        tk.Frame(root, bg=T.BORDER, height=1).grid(row=5, column=0, sticky="ew", padx=14)
 
         # 参数区
         hd = tk.Frame(root, bg=T.PANEL)
-        hd.pack(fill="x", padx=14, pady=(10, 4))
+        hd.grid(row=6, column=0, sticky="ew", padx=14, pady=(10, 4))
         tk.Label(hd, text="参数", bg=T.PANEL, fg=T.TEXT,
                  font=T.UI_FONT_B).pack(side="left")
 
-        self.param_box = tk.Frame(root, bg=T.PANEL)
+        # 只有参数区自己滚：投放区和脚本列表固定，永远看得见。
+        # 整栏一起滚会出现两条并排的滚动条（列表一条、整栏一条），既多余又难分辨。
+        sf = ScrollFrame(root, bg=T.PANEL)
+        sf.grid(row=7, column=0, sticky="nsew")
+        # 不设 minsize：窗口极矮时宁可参数区先变矮，也要保证「开始」永远在
+        root.rowconfigure(7, weight=1)
+        self.left_scroll = sf
+        self.param_box = tk.Frame(sf.body, bg=T.PANEL)
         self.param_box.pack(fill="both", expand=True, padx=14, pady=(0, 8))
 
         # 底部操作
-        tk.Frame(root, bg=T.BORDER, height=1).pack(fill="x", padx=14)
+        tk.Frame(root, bg=T.BORDER, height=1).grid(row=8, column=0, sticky="ew", padx=14)
         act = tk.Frame(root, bg=T.PANEL)
-        act.pack(fill="x", padx=14, pady=12)
+        act.grid(row=9, column=0, sticky="ew", padx=14, pady=12)
 
         self.btn_run = ttk.Button(act, text="开 始", style="Accent.TButton",
                                   command=self._run)
@@ -385,11 +402,9 @@ class App(_ROOT_BASE):
 
         tw = tk.Frame(tframe, bg=T.PANEL)
         tw.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.term = T.make_text(tw, mono=True)
+        self.term = T.make_text(tw, mono=True, wrap="word")
         self.term.pack(side="left", fill="both", expand=True)
-        tsb = ttk.Scrollbar(tw, orient="vertical", command=self.term.yview)
-        tsb.pack(side="right", fill="y")
-        self.term.configure(yscrollcommand=tsb.set)
+        mount_scroll(self.term, tw)
         self._init_term_tags()
 
         # --- 产物 ---
@@ -410,15 +425,13 @@ class App(_ROOT_BASE):
         tw2.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         cols = ("size",)
         self.tree = ttk.Treeview(tw2, columns=cols, show="tree headings",
-                                 selectmode="browse")
+                                 selectmode="browse", height=8)
         self.tree.heading("#0", text="文件", anchor="w")
         self.tree.heading("size", text="大小", anchor="e")
-        self.tree.column("#0", width=520, anchor="w")
+        self.tree.column("#0", width=420, anchor="w")
         self.tree.column("size", width=100, anchor="e", stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
-        tsb2 = ttk.Scrollbar(tw2, orient="vertical", command=self.tree.yview)
-        tsb2.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=tsb2.set)
+        mount_scroll(self.tree, tw2)
         self.tree.bind("<Double-1>", self._open_tree_item)
 
         # --- 报告 ---
@@ -435,11 +448,9 @@ class App(_ROOT_BASE):
 
         rw = tk.Frame(rframe, bg=T.PANEL)
         rw.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.report = T.make_text(rw, mono=False, bg=T.PANEL, fg=T.TEXT)
+        self.report = T.make_text(rw, mono=False, bg=T.PANEL, fg=T.TEXT, wrap="word")
         self.report.pack(side="left", fill="both", expand=True)
-        rsb = ttk.Scrollbar(rw, orient="vertical", command=self.report.yview)
-        rsb.pack(side="right", fill="y")
-        self.report.configure(yscrollcommand=rsb.set)
+        mount_scroll(self.report, rw)
         self.report.tag_configure("h1", foreground=T.ACCENT,
                                   font=(T.UI_FONT[0], 14, "bold"), spacing1=8, spacing3=6)
         self.report.tag_configure("h2", foreground="#9ecbff",
@@ -532,7 +543,7 @@ class App(_ROOT_BASE):
             self.lb.insert("end", "  " + (s.name or Path(s.file).stem))
         # 列表高度跟着脚本数量走，避免底下挂一串空行
         try:
-            self.lb.configure(height=max(4, min(9, len(self.scripts) or 4)))
+            self.lb.configure(height=max(4, min(5, len(self.scripts) or 4)))
         except Exception:
             pass
         if self.scripts:
@@ -552,6 +563,11 @@ class App(_ROOT_BASE):
         self.current = self.scripts[idx]
         self.lbl_desc.configure(text=self.current.desc or "（无说明）")
         self._render_params(self.current)
+        # 参数在列表下方，窗口不高时在折叠线以下：用户手动点脚本后自动滚过去，
+        # 否则只看到「开始」按钮，以为参数没了。
+        # 启动时的默认选中不滚 —— 那会把顶部的投放区顶出视野，反而像「投放区不见了」。
+        if _evt is not None and getattr(self, "left_scroll", None) is not None:
+            self.after(30, lambda: self.left_scroll.scroll_to(self.param_box))
 
     def _render_params(self, meta: ScriptMeta) -> None:
         for w in self.param_box.winfo_children():
@@ -584,8 +600,19 @@ class App(_ROOT_BASE):
             row = tk.Frame(self.param_box, bg=T.PANEL)
             row.pack(fill="x", pady=4)
 
-            tk.Label(row, text=p.label, bg=T.PANEL, fg=T.MUTED,
-                     font=T.UI_FONT_S, anchor="w", width=11).pack(side="left")
+            # 长标签不再硬塞进 11 字符宽的一列：那样会折成 4 行、跟输入框错位。
+            # 超过 10 个字就独占一行，输入框整行在下面，读起来是「标签 / 输入」两段。
+            long_label = len(p.label) > 10
+            if long_label:
+                tk.Label(row, text=p.label, bg=T.PANEL, fg=T.MUTED,
+                         font=T.UI_FONT_S, anchor="w", justify="left",
+                         wraplength=290).pack(fill="x")
+                pk = {"side": "top", "fill": "x", "pady": (2, 0)}
+            else:
+                tk.Label(row, text=p.label, bg=T.PANEL, fg=T.MUTED,
+                         font=T.UI_FONT_S, anchor="w", width=11,
+                         justify="left").pack(side="left")
+                pk = {"side": "left", "fill": "x", "expand": True}
 
             if p.ptype == "choice":
                 # 默认值必须在候选里：脚本写错或者改了候选，StringVar 里留一个
@@ -596,7 +623,7 @@ class App(_ROOT_BASE):
                 var = tk.StringVar(value=d0)
                 cbx = ttk.Combobox(row, textvariable=var, values=p.choices,
                                    state="readonly", width=14)
-                cbx.pack(side="left", fill="x", expand=True)
+                cbx.pack(**pk)
                 self.param_vars[p.name] = ("str", var)
 
             elif p.ptype in ("file", "dir"):
@@ -617,7 +644,7 @@ class App(_ROOT_BASE):
             else:  # str / int
                 var = tk.StringVar(value=str(p.default if p.default != "" else ""))
                 ent = ttk.Entry(row, textvariable=var)
-                ent.pack(side="left", fill="x", expand=True)
+                ent.pack(**pk)
                 self.param_vars[p.name] = ("int" if p.ptype == "int" else "str", var)
 
         # 参数少时用提示把底部填满，避免大片空白
@@ -1035,9 +1062,7 @@ class App(_ROOT_BASE):
             tv.heading(c, text=txt)
             tv.column(c, width=w, anchor="w" if c != "state" else "center")
         tv.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=tv.yview)
-        sb.pack(side="right", fill="y")
-        tv.configure(yscrollcommand=sb.set)
+        mount_scroll(tv, wrap)
 
         tv.tag_configure("ok", foreground=T.OK)
         tv.tag_configure("miss", foreground=T.ERR)
@@ -1116,11 +1141,10 @@ class App(_ROOT_BASE):
         pw.add(left, minsize=250, width=300)
         pw.add(right, minsize=420)
 
-        self.snip_tree = ttk.Treeview(left, show="tree", selectmode="extended")
+        self.snip_tree = ttk.Treeview(left, show="tree", selectmode="extended",
+                                      height=10)
         self.snip_tree.pack(side="left", fill="both", expand=True)
-        ssb = ttk.Scrollbar(left, orient="vertical", command=self.snip_tree.yview)
-        ssb.pack(side="right", fill="y")
-        self.snip_tree.configure(yscrollcommand=ssb.set)
+        mount_scroll(self.snip_tree, left)
         self.snip_tree.bind("<<TreeviewSelect>>", self._snip_on_select)
 
         # --- 右侧详情 ---
@@ -1131,44 +1155,47 @@ class App(_ROOT_BASE):
 
         self.lbl_snip_meta = tk.Label(right, text="", bg=T.PANEL, fg=T.MUTED,
                                       font=T.UI_FONT_S, anchor="w",
-                                      justify="left", wraplength=620)
+                                      justify="left", wraplength=520)
         self.lbl_snip_meta.pack(fill="x", padx=14, pady=(0, 6))
 
         self.lbl_snip_purpose = tk.Label(right, text="", bg=T.PANEL, fg=T.TEXT,
                                          font=T.UI_FONT_S, anchor="w",
-                                         justify="left", wraplength=620)
+                                         justify="left", wraplength=520)
         self.lbl_snip_purpose.pack(fill="x", padx=14, pady=(0, 6))
+
+        def _snip_rewrap(evt):
+            wpx = max(240, evt.width - 40)
+            self.lbl_snip_meta.configure(wraplength=wpx)
+            self.lbl_snip_purpose.configure(wraplength=wpx)
+        right.bind("<Configure>", _snip_rewrap, add="+")
+
+        # 9 个按钮一行放不下，窄窗口会把后几个挤到画面外 → 流式换行
+        bar = FlowFrame(right, bg=T.PANEL, gap=6)
+        # 先占位，避免按钮被代码区挤成 0 高度
+        bar.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        for txt, style, cmd in (
+            ("校验语法", "Accent.TButton", self._snip_validate),
+            ("＋新代码块", "TButton", lambda: self._snip_editor()),
+            ("编辑", "Ghost.TButton", self._snip_edit),
+            ("复制", "TButton", self._snip_copy),
+            ("送终端", "TButton", self._snip_to_repl),
+            ("保存为脚本", "TButton", self._snip_save),
+            ("拼装选中", "TButton", self._snip_compose),
+            ("目录总览", "TButton", self._snip_catalog_window),
+            ("导出目录", "Ghost.TButton", self._snip_catalog),
+        ):
+            b = ttk.Button(bar, text=txt, style=style, command=cmd)
+            bar.add(b)
 
         code_wrap = tk.Frame(right, bg=T.PANEL)
         code_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        self.snip_code = T.make_text(code_wrap, mono=True, undo=True)
-        self.snip_code.pack(side="left", fill="both", expand=True)
-        csb = ttk.Scrollbar(code_wrap, orient="vertical", command=self.snip_code.yview)
-        csb.pack(side="right", fill="y")
-        self.snip_code.configure(yscrollcommand=csb.set, wrap="none")
+        # 代码不折行 + 横向滚动条：长行（smali / 长路径）不会「右半边看不到」
+        box = CodeBox(code_wrap, bg=T.TERM_BG,
+                      factory=lambda par: T.make_text(par, mono=True, undo=True))
+        box.pack(fill="both", expand=True)
+        self.snip_code = box.text
         self.snip_code.tag_configure("ok", foreground=T.TERM_OK)
         self.snip_code.tag_configure("err", foreground=T.TERM_ERR)
-
-        bar = tk.Frame(right, bg=T.PANEL)
-        bar.pack(fill="x", padx=12, pady=(0, 10))
-        ttk.Button(bar, text="校验语法", style="Accent.TButton",
-                   command=self._snip_validate).pack(side="left")
-        ttk.Button(bar, text="＋新代码块", style="TButton",
-                   command=lambda: self._snip_editor()).pack(side="left", padx=6)
-        ttk.Button(bar, text="编辑", style="Ghost.TButton",
-                   command=self._snip_edit).pack(side="left")
-        ttk.Button(bar, text="复制", style="TButton",
-                   command=self._snip_copy).pack(side="left", padx=6)
-        ttk.Button(bar, text="送终端", style="TButton",
-                   command=self._snip_to_repl).pack(side="left")
-        ttk.Button(bar, text="保存为脚本", style="TButton",
-                   command=self._snip_save).pack(side="left", padx=6)
-        ttk.Button(bar, text="拼装选中", style="TButton",
-                   command=self._snip_compose).pack(side="left", padx=6)
-        ttk.Button(bar, text="目录总览", style="TButton",
-                   command=self._snip_catalog_window).pack(side="left")
-        ttk.Button(bar, text="导出目录", style="Ghost.TButton",
-                   command=self._snip_catalog).pack(side="right")
 
         self.lbl_snip_msg = tk.Label(right, text="", bg=T.PANEL, fg=T.OK,
                                      font=T.UI_FONT_S, anchor="w")
@@ -1371,9 +1398,7 @@ class App(_ROOT_BASE):
         code_t = T.make_text(cw, mono=True, undo=True)
         code_t.configure(state="normal")
         code_t.pack(side="left", fill="both", expand=True)
-        csb = ttk.Scrollbar(cw, orient="vertical", command=code_t.yview)
-        csb.pack(side="right", fill="y")
-        code_t.configure(yscrollcommand=csb.set)
+        mount_scroll(code_t, cw)
         if old:
             code_t.insert("1.0", old.code)
         else:
@@ -1494,9 +1519,7 @@ class App(_ROOT_BASE):
         order_tv.column("id", width=160)
         order_tv.column("title", width=180)
         order_tv.pack(side="left", fill="both", expand=True)
-        lsb = ttk.Scrollbar(lwrap, orient="vertical", command=order_tv.yview)
-        lsb.pack(side="right", fill="y")
-        order_tv.configure(yscrollcommand=lsb.set)
+        mount_scroll(order_tv, lwrap)
         for sid in ids:
             sn = lib.get(sid)
             order_tv.insert("", "end", values=(sid, sn.title if sn else sid))
@@ -1559,9 +1582,7 @@ class App(_ROOT_BASE):
         code_t = T.make_text(rwrap, mono=True)
         code_t.configure(state="normal")
         code_t.pack(side="left", fill="both", expand=True)
-        rsb = ttk.Scrollbar(rwrap, orient="vertical", command=code_t.yview)
-        rsb.pack(side="right", fill="y")
-        code_t.configure(yscrollcommand=rsb.set)
+        mount_scroll(code_t, rwrap)
 
         argw = tk.Frame(right, bg=T.PANEL)
         argw.pack(fill="x", padx=10, pady=6)
@@ -1688,42 +1709,8 @@ class App(_ROOT_BASE):
                                          fg=T.MUTED, font=T.UI_FONT_S)
         self.lbl_patch_status.pack(side="right")
 
-        cols = ("id", "pre", "conf", "cat", "method", "sug")
-        wrap = tk.Frame(f, bg=T.PANEL)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        self.patch_tv = ttk.Treeview(wrap, columns=cols, show="headings",
-                                     selectmode="extended", height=8)
-        for c, txt, w, anchor in (("id", "ID", 52, "center"),
-                                  ("pre", "启动", 52, "center"),
-                                  ("conf", "置信", 52, "center"),
-                                  ("cat", "类别", 88, "w"),
-                                  ("method", "类.方法", 240, "w"),
-                                  ("sug", "建议", 300, "w")):
-            self.patch_tv.heading(c, text=txt)
-            self.patch_tv.column(c, width=w, anchor=anchor)
-        self.patch_tv.pack(side="left", fill="both", expand=True)
-        psb = ttk.Scrollbar(wrap, orient="vertical", command=self.patch_tv.yview)
-        psb.pack(side="right", fill="y")
-        self.patch_tv.configure(yscrollcommand=psb.set)
-        self.patch_tv.bind("<<TreeviewSelect>>", self._patch_on_select)
-        self.patch_tv.tag_configure("pre", foreground=T.ACCENT)
-        self.patch_tv.tag_configure("run", foreground=T.MUTED)
-
-        det = tk.Frame(f, bg=T.PANEL)
-        det.pack(fill="both", expand=False, padx=12, pady=(0, 4))
-        self.patch_detail = T.make_text(det, mono=True, height=9, wrap="word")
-        self.patch_detail.pack(side="left", fill="both", expand=True)
-        dsb = ttk.Scrollbar(det, orient="vertical", command=self.patch_detail.yview)
-        dsb.pack(side="right", fill="y")
-        self.patch_detail.configure(yscrollcommand=dsb.set)
-        self.patch_detail.tag_configure("head", foreground=T.ACCENT,
-                                        font=(T.MONO_FONT[0], T.MONO_FONT[1], "bold"))
-        self.patch_detail.tag_configure("ok", foreground=T.TERM_OK)
-        self.patch_detail.tag_configure("err", foreground=T.TERM_ERR)
-        self.patch_detail.tag_configure("muted", foreground=T.MUTED)
-
         act = tk.Frame(f, bg=T.PANEL)
-        act.pack(fill="x", padx=12, pady=(4, 10))
+        act.pack(side="bottom", fill="x", padx=12, pady=(4, 10))
         ttk.Button(act, text="预演（不写盘）", style="TButton",
                    command=lambda: self._patch_run("dry")).pack(side="left")
         ttk.Button(act, text="应用补丁", style="Accent.TButton",
@@ -1736,6 +1723,38 @@ class App(_ROOT_BASE):
                    command=self._patch_to_repl).pack(side="left")
         ttk.Button(act, text="打开产物", style="Ghost.TButton",
                    command=self._open_out).pack(side="right")
+
+        cols = ("id", "pre", "conf", "cat", "method", "sug")
+        wrap = tk.Frame(f, bg=T.PANEL)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        self.patch_tv = ttk.Treeview(wrap, columns=cols, show="headings",
+                                     selectmode="extended", height=5)
+        # 列宽合计要小于最小窗口下的可用宽度（约 640），否则 Treeview 请求宽度
+        # 超过容器，pack 会把竖向滚动条挤成 1px（看着像没有滚动条/拖不动）。
+        for c, txt, w, anchor in (("id", "ID", 44, "center"),
+                                  ("pre", "启动", 44, "center"),
+                                  ("conf", "置信", 44, "center"),
+                                  ("cat", "类别", 74, "w"),
+                                  ("method", "类.方法", 210, "w"),
+                                  ("sug", "建议", 210, "w")):
+            self.patch_tv.heading(c, text=txt)
+            self.patch_tv.column(c, width=w, anchor=anchor)
+        self.patch_tv.pack(side="left", fill="both", expand=True)
+        mount_scroll(self.patch_tv, wrap)
+        self.patch_tv.bind("<<TreeviewSelect>>", self._patch_on_select)
+        self.patch_tv.tag_configure("pre", foreground=T.ACCENT)
+        self.patch_tv.tag_configure("run", foreground=T.MUTED)
+
+        det = tk.Frame(f, bg=T.PANEL)
+        det.pack(fill="both", expand=False, padx=12, pady=(0, 4))
+        self.patch_detail = T.make_text(det, mono=True, height=6, wrap="word")
+        self.patch_detail.pack(side="left", fill="both", expand=True)
+        mount_scroll(self.patch_detail, det)
+        self.patch_detail.tag_configure("head", foreground=T.ACCENT,
+                                        font=(T.MONO_FONT[0], T.MONO_FONT[1], "bold"))
+        self.patch_detail.tag_configure("ok", foreground=T.TERM_OK)
+        self.patch_detail.tag_configure("err", foreground=T.TERM_ERR)
+        self.patch_detail.tag_configure("muted", foreground=T.MUTED)
 
         self._patch_root: Path | None = None
         self._patch_rep = None
@@ -2168,18 +2187,15 @@ class App(_ROOT_BASE):
         pw.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         top_f = tk.Frame(pw, bg=T.PANEL)
         bot_f = tk.Frame(pw, bg=T.PANEL)
-        pw.add(top_f, minsize=110, height=260)
+        pw.add(top_f, minsize=110, height=200)
         pw.add(bot_f, minsize=90)
 
         # --- 上：编辑器 ---
-        ew = tk.Frame(top_f, bg=T.PANEL)
-        ew.pack(fill="both", expand=True)
-        self.repl_edit = T.make_text(ew, mono=True, undo=True)
+        box = CodeBox(top_f, bg=T.TERM_BG,
+                      factory=lambda par: T.make_text(par, mono=True, undo=True))
+        box.pack(fill="both", expand=True)
+        self.repl_edit = box.text
         self.repl_edit.configure(state="normal")     # make_text 默认只读，这里要可编辑
-        self.repl_edit.pack(side="left", fill="both", expand=True)
-        esb = ttk.Scrollbar(ew, orient="vertical", command=self.repl_edit.yview)
-        esb.pack(side="right", fill="y")
-        self.repl_edit.configure(yscrollcommand=esb.set)
         self.repl_edit.bind("<F5>", lambda e: (self._repl_run(), "break")[1])
         self.repl_edit.bind("<Control-Return>", lambda e: (self._repl_run(), "break")[1])
         self.repl_edit.insert("1.0", _REPL_WELCOME)
@@ -2187,11 +2203,10 @@ class App(_ROOT_BASE):
         # --- 下：输出 ---
         ow = tk.Frame(bot_f, bg=T.PANEL)
         ow.pack(fill="both", expand=True)
-        self.repl_out = T.make_text(ow, mono=True)
+        self.repl_out = T.make_text(ow, mono=True, wrap="word")
         self.repl_out.pack(side="left", fill="both", expand=True)
-        osb = ttk.Scrollbar(ow, orient="vertical", command=self.repl_out.yview)
-        osb.pack(side="right", fill="y")
-        self.repl_out.configure(yscrollcommand=osb.set, state="disabled")
+        mount_scroll(self.repl_out, ow)
+        self.repl_out.configure(state="disabled")
         self.repl_out.tag_configure("meta", foreground=T.MUTED)
         self.repl_out.tag_configure("err", foreground=T.TERM_ERR)
         self.repl_out.tag_configure("ok", foreground=T.TERM_OK)
@@ -2381,9 +2396,7 @@ class App(_ROOT_BASE):
             tv.heading(c, text=t)
             tv.column(c, width=w, anchor="w")
         tv.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=tv.yview)
-        sb.pack(side="right", fill="y")
-        tv.configure(yscrollcommand=sb.set)
+        mount_scroll(tv, wrap)
 
         def fill(k: str = "") -> None:
             tv.delete(*tv.get_children())
@@ -2469,20 +2482,9 @@ class App(_ROOT_BASE):
                  bg=T.PANEL, fg=T.MUTED, font=T.UI_FONT_S, anchor="w").pack(
             fill="x", padx=14, pady=(0, 6))
 
-        wrap = tk.Frame(f, bg=T.PANEL)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
-        self.chat_log = T.make_text(wrap, mono=True)
-        self.chat_log.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.chat_log.yview)
-        sb.pack(side="right", fill="y")
-        self.chat_log.configure(yscrollcommand=sb.set)
-        for tag, color in (("me", T.ACCENT), ("plan", T.TERM_CMD),
-                           ("ok", T.TERM_OK), ("err", T.TERM_ERR),
-                           ("hint", T.MUTED)):
-            self.chat_log.tag_configure(tag, foreground=color)
-
         inw = tk.Frame(f, bg=T.PANEL)
-        inw.pack(fill="x", padx=12, pady=(0, 10))
+        # 先占位：输入框永不因为日志把空间吃光而被压掉
+        inw.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
         self.chat_input = T.make_text(inw, mono=False, height=3)
         self.chat_input.configure(state="normal")
         self.chat_input.pack(side="left", fill="both", expand=True)
@@ -2495,6 +2497,16 @@ class App(_ROOT_BASE):
         self.btn_chat.pack(fill="x")
         ttk.Button(btns, text="清空", style="Ghost.TButton",
                    command=self._chat_clear).pack(fill="x", pady=(6, 0))
+
+        wrap = tk.Frame(f, bg=T.PANEL)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        self.chat_log = T.make_text(wrap, mono=True, wrap="word")
+        self.chat_log.pack(side="left", fill="both", expand=True)
+        mount_scroll(self.chat_log, wrap)
+        for tag, color in (("me", T.ACCENT), ("plan", T.TERM_CMD),
+                           ("ok", T.TERM_OK), ("err", T.TERM_ERR),
+                           ("hint", T.MUTED)):
+            self.chat_log.tag_configure(tag, foreground=color)
 
         self._api_srv = None
         self._chat_busy = False
@@ -2659,48 +2671,58 @@ class App(_ROOT_BASE):
                                  fg=T.MUTED, font=T.UI_FONT_S)
         self.lbl_auto.pack(side="left", padx=10)
 
-        tk.Label(f, text="唯一的处理入口（原「卡密绕过」已并入这一页，不再单独一个页签）。"
-                         "文件丢左上投放区，点一个按钮就完事。防拦截分三层，任一层生效程序就能跑：\n"
-                         "　① 改判定 —— 把校验方法改成恒返回「通过」；\n"
-                         "　② 摘处置 —— 把「检测到就不让跑」的 exit / killProcess / finish 换成空操作，"
-                         "不管检测藏多深、套几层包装都退不出去；\n"
-                         "　③ 联网覆盖 —— 服务器说不行也没关系：状态码强制 200、成功标志强制 true，"
-                         "并附一份 Frida 脚本把返回体一起洗白（加固包也能用）。\n"
-                         "重打包必然踩的「签名自校验 / dex 完整性 / 反调试 / 反 root / 反模拟器 / 反注入」"
-                         "会被逐条中和；壳与代码抽取这类改不动的会如实报出来。"
-                         "原文件不动，全程可备份回滚。",
-                 bg=T.PANEL, fg=T.MUTED, font=T.UI_FONT_S,
-                 anchor="w", wraplength=1000).pack(fill="x", padx=14, pady=(0, 8))
+        self.lbl_auto_desc = tk.Label(
+            f, text="唯一的处理入口（原「卡密绕过」已并入这一页，不再单独一个页签）。"
+                    "文件丢左上投放区，点一个按钮就完事。防拦截分三层，任一层生效程序就能跑：\n"
+                    "　① 改判定 —— 把校验方法改成恒返回「通过」；\n"
+                    "　② 摘处置 —— 把「检测到就不让跑」的 exit / killProcess / finish 换成空操作，"
+                    "不管检测藏多深、套几层包装都退不出去；\n"
+                    "　③ 联网覆盖 —— 服务器说不行也没关系：状态码强制 200、成功标志强制 true，"
+                    "并附一份 Frida 脚本把返回体一起洗白（加固包也能用）。\n"
+                    "重打包必然踩的「签名自校验 / dex 完整性 / 反调试 / 反 root / 反模拟器 / 反注入」"
+                    "会被逐条中和；壳与代码抽取这类改不动的会如实报出来。"
+                    "原文件不动，全程可备份回滚。",
+            bg=T.PANEL, fg=T.MUTED, font=T.UI_FONT_S,
+            anchor="w", justify="left", wraplength=760)
+        self.lbl_auto_desc.pack(fill="x", padx=14, pady=(0, 8))
+        # 固定 wraplength 会在窄窗口上把行尾截掉（文字按 760 折行，
+        # 控件只有 600 宽 → 后半截直接被裁）。随宽度重算。
+        f.bind("<Configure>",
+               lambda e: self.lbl_auto_desc.configure(
+                   wraplength=max(320, e.width - 48)), add="+")
 
-        bar = tk.Frame(f, bg=T.PANEL)
+        bar = FlowFrame(f, bg=T.PANEL, gap=6)
         bar.pack(fill="x", padx=12, pady=(0, 8))
         for i, (label, stage) in enumerate(self._FULLAUTO_STAGES):
             b = ttk.Button(bar, text=label,
                            style="Accent.TButton" if stage == "all" else "Ghost.TButton",
                            command=lambda s=stage: self._fullauto_start(s))
-            b.pack(side="left", padx=(0 if i == 0 else 6, 0))
-        self._fullauto_btns = list(bar.winfo_children())
+            bar.add(b)
         self.auto_desktop = tk.BooleanVar(value=True)   # 默认开：小白不用学打包
-        tk.Checkbutton(bar, text="成品自动放桌面", variable=self.auto_desktop,
-                       bg=T.PANEL, fg=T.TERM_OK, activebackground=T.PANEL,
-                       selectcolor=T.PANEL2, borderwidth=0,
-                       font=T.UI_FONT_S).pack(side="left", padx=12)
+        cb_desktop = tk.Checkbutton(bar, text="成品自动放桌面", variable=self.auto_desktop,
+                                    bg=T.PANEL, fg=T.TERM_OK, activebackground=T.PANEL,
+                                    selectcolor=T.PANEL2, borderwidth=0,
+                                    font=T.UI_FONT_S)
+        bar.add(cb_desktop)
         self.auto_verify = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="装到设备并启动验证（需 adb）", variable=self.auto_verify,
-                       bg=T.PANEL, fg=T.TEXT, activebackground=T.PANEL,
-                       selectcolor=T.PANEL2, borderwidth=0,
-                       font=T.UI_FONT_S).pack(side="left")
-        ttk.Button(bar, text="打开产物", style="Ghost.TButton",
-                   command=self._fullauto_open).pack(side="right")
+        cb_verify = tk.Checkbutton(bar, text="装到设备并启动验证（需 adb）",
+                                   variable=self.auto_verify,
+                                   bg=T.PANEL, fg=T.TEXT, activebackground=T.PANEL,
+                                   selectcolor=T.PANEL2, borderwidth=0,
+                                   font=T.UI_FONT_S)
+        bar.add(cb_verify)
+        b_open = ttk.Button(bar, text="打开产物", style="Ghost.TButton",
+                            command=self._fullauto_open)
+        bar.add(b_open)
+        self._fullauto_btns = [b for b in bar._items
+                               if isinstance(b, (ttk.Button, tk.Checkbutton))]
 
         wrap = tk.Frame(f, bg=T.PANEL)
         wrap.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-        self.auto_log = T.make_text(wrap, mono=True)
+        self.auto_log = T.make_text(wrap, mono=True, wrap="word")
         self.auto_log.configure(state="normal")
         self.auto_log.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.auto_log.yview)
-        sb.pack(side="right", fill="y")
-        self.auto_log.configure(yscrollcommand=sb.set)
+        mount_scroll(self.auto_log, wrap)
         self.auto_log.tag_configure("ok", foreground=T.TERM_OK)
         self.auto_log.tag_configure("err", foreground=T.TERM_ERR)
         self.auto_log.tag_configure("meta", foreground=T.MUTED)

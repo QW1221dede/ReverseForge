@@ -129,6 +129,20 @@ def apply(root: tk.Misc, scale: float = 1.0) -> ttk.Style:
     st.map("TCombobox", fieldbackground=[("readonly", PANEL2)],
            foreground=[("readonly", TEXT)])
 
+    # 数字微调框：ttk 没有内建 TSpinbox 样式，不显式配就会退回系统浅色主题，
+    # 结果是「白底 + 浅字」，在深色界面上几乎看不见（用户眼里就是「显示不出来」）。
+    _sb_opts = dict(fieldbackground=PANEL2, background=PANEL2, foreground=TEXT,
+                    arrowcolor=MUTED, insertcolor=ACCENT, borderwidth=0,
+                    padding=(6, 5))
+    try:
+        st.configure("TSpinbox", **_sb_opts)
+        st.map("TSpinbox",
+               fieldbackground=[("disabled", PANEL), ("readonly", PANEL2)],
+               foreground=[("disabled", MUTED)],
+               arrowcolor=[("active", TEXT)])
+    except Exception:                                    # noqa: BLE001
+        pass
+
     # 进度条：cl​am 下 thickness 太薄会看不见，6px + 亮一档的底槽才够
     st.configure("TProgressbar", background=ACCENT, troughcolor="#2b3243",
                  borderwidth=0, thickness=6, lightcolor=ACCENT, darkcolor=ACCENT)
@@ -149,9 +163,14 @@ def apply(root: tk.Misc, scale: float = 1.0) -> ttk.Style:
     st.configure("Sash", sashthickness=6, gripcount=0, background=BG)
 
     # 滚动条
-    st.configure("TScrollbar", background=PANEL2, troughcolor=BG,
-                 borderwidth=0, arrowcolor=MUTED, arrowsize=12)
-    st.map("TScrollbar", background=[("active", BORDER)])
+    # 原来 background=PANEL2 和 trough=BG 几乎同色，滑块看不出来，
+    # 用户以为「没有滚动条 / 拖不动」。滑块抬亮一档，滑槽压暗，才有可辨识的对比。
+    st.configure("TScrollbar", background="#3c4658", troughcolor="#12161d",
+                 bordercolor="#12161d", lightcolor="#4a5568", darkcolor="#4a5568",
+                 borderwidth=0, arrowcolor=MUTED, arrowsize=14, width=11)
+    st.map("TScrollbar",
+           background=[("active", "#55617a"), ("pressed", ACCENT)],
+           arrowcolor=[("active", TEXT)])
 
     # 树
     st.configure("Treeview", background=PANEL, fieldbackground=PANEL,
@@ -170,16 +189,25 @@ def apply(root: tk.Misc, scale: float = 1.0) -> ttk.Style:
 
 def make_text(parent, mono: bool = True, bg: str | None = None,
               fg: str | None = None, size: int | None = None, **kw) -> tk.Text:
-    """统一风格的 Text 控件（带基本配色与边距）。"""
+    """
+    统一风格的 Text 控件（带基本配色与边距）。
+
+    height 默认 8 行而不是 tk 默认的 24 行：24 行约 400px，一个页面叠两个
+    就超过窗口高度，而 pack 在空间不足时会把最后排控件压成 0 高度 ——
+    表现就是「按钮/输入框莫名消失」。布局靠 expand 撑开，不靠请求高度。
+    """
     font = (MONO_FONT[0], size or MONO_FONT[1]) if mono else (UI_FONT[0], size or UI_FONT[1])
+    # width=1：tk 默认 80 字符宽 ≈ 620px，会让整页的「请求宽度」虚高，
+    # 窗口一窄就把右边裁掉。实际宽度由 fill/expand 决定，不需要请求值。
     t = tk.Text(
         parent,
+        width=kw.pop("width", 1),
         bg=bg or TERM_BG, fg=fg or TERM_FG,
         insertbackground=ACCENT if mono else TEXT,
         selectbackground=SEL, selectforeground=TEXT,
         font=font, borderwidth=0, highlightthickness=0,
         padx=10, pady=8, wrap=kw.pop("wrap", "none"),
-        undo=kw.pop("undo", False), **kw,
+        undo=kw.pop("undo", False), height=kw.pop("height", 8), **kw,
     )
     t.configure(state="disabled")
     return t
