@@ -8,6 +8,7 @@ venv/
 # --- 运行产物 ---
 _test_out/
 _test*/
+_e2e/
 workspace/
 logs/
 *.log

@@ -659,35 +659,38 @@ def unpad_bytes(data: bytes, block: int = 16) -> tuple[bytes, str]:
 # 压缩层（很多"加密"其实是压缩）
 # ---------------------------------------------------------------------------
 
+MAX_DECOMP = 64 << 20       # 单次解压最多吐 64MB
+
+
 def decompress_auto(data: bytes) -> tuple[bytes, str]:
-    """zlib / gzip / bz2 / lzma / raw deflate 全试一遍。"""
+    """
+    zlib / gzip / bz2 / lzma / raw deflate 全试一遍。
+
+    全程带输出上限：1KB 的压缩炸弹能解出 10GB，直接 decompress()
+    会把进程撑死。用 decompressobj(max_length=) 到 64MB 就停 ——
+    超过这个量级本来也不是我们要找的"伪装成明文的压缩段"。
+    """
     if not data:
         return b"", ""
     for wbits, name in ((zlib.MAX_WBITS, "zlib"), (-zlib.MAX_WBITS, "raw deflate"),
                         (zlib.MAX_WBITS | 16, "gzip")):
         try:
-            out = zlib.decompress(data, wbits)
+            out = zlib.decompressobj(wbits).decompress(data, MAX_DECOMP)
             if out:
                 return out, name
         except zlib.error:
             continue
     try:
-        out = bz2.decompress(data)
+        out = bz2.BZ2Decompressor().decompress(data, max_length=MAX_DECOMP)
         if out:
             return out, "bzip2"
     except (OSError, ValueError):
         pass
     try:
-        out = lzma.decompress(data)
+        out = lzma.LZMADecompressor().decompress(data, max_length=MAX_DECOMP)
         if out:
             return out, "lzma/xz"
     except (lzma.LZMAError, OSError, ValueError):
-        pass
-    try:
-        out = gzip.decompress(data)
-        if out:
-            return out, "gzip"
-    except (OSError, ValueError):
         pass
     return b"", ""
 

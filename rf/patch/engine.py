@@ -29,7 +29,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
+import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -302,6 +304,39 @@ def ensure_keystore(path: str | Path | None = None) -> Path:
     return ks
 
 
+def _fix_fake_png(root: Path) -> list[str]:
+    """
+    把「扩展名是 .png、实际是 JPEG/GIF/WebP」的资源就地转成真 PNG。
+
+    这种包很常见：作者拿 jpg 改后缀当图标。aapt2 会以
+    "failed to read PNG signature" 让整个资源编译失败，
+    于是只能走「只换 dex」的退路 —— 资源里的改动（文案/开关）全丢。
+    转码后 apktool b 能正常跑完，完整重建这条路就通了。
+    """
+    try:
+        from PIL import Image                       # noqa: PLC0415
+    except Exception:                               # noqa: BLE001
+        return []
+    fixed: list[str] = []
+    res_dir = root / "res"
+    if not res_dir.is_dir():
+        return fixed
+    for p in res_dir.rglob("*.png"):
+        try:
+            with p.open("rb") as f:
+                if f.read(8).startswith(b"\x89PNG\r\n\x1a\n"):
+                    continue
+        except OSError:
+            continue
+        try:
+            with Image.open(p) as im:
+                im.convert("RGBA").save(p, format="PNG")
+            fixed.append(p.name)
+        except Exception:                           # noqa: BLE001
+            continue
+    return fixed
+
+
 def rebuild(unpack_dir: str | Path, out_apk: str | Path | None = None,
             *, sign: bool = True, align: bool = True, timeout: float = 900,
             ops: list[PatchOp] | None = None, roundtrip: bool = True,
@@ -315,13 +350,38 @@ def rebuild(unpack_dir: str | Path, out_apk: str | Path | None = None,
     root = Path(unpack_dir)
     res = RebuildResult()
     out = Path(out_apk) if out_apk else (root.parent / f"{root.name}_patched.apk")
-    tmp = root.parent / f"{root.name}_build"
-    unsigned = tmp / "unsigned.apk"
-    tmp.mkdir(parents=True, exist_ok=True)
 
     if not root.exists():
         res.errors.append(f"解包目录不存在：{root}")
         return res
+
+    # aapt2 用系统代码页解释路径：中文会变乱码（"全自动化"→"鍏ㄨ嚜鍔ㄥ寲"），
+    # 直接 failed to open directory。路径不是纯 ASCII 就复制到英文临时目录构建，
+    # 产物照样写到 out 指定位置。
+    build_root = root
+    try:
+        str(root.resolve()).encode("ascii")
+    except UnicodeEncodeError:
+        try:
+            total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+        except OSError:
+            total = 0
+        if total <= 1536 << 20:                 # ≤1.5GB 才复制，太大就原地试
+            tag = hashlib.md5(str(root.resolve()).encode("utf-8")).hexdigest()[:10]
+            dst = Path(tempfile.gettempdir()) / f"rf_build_{tag}" / "app"
+            try:
+                if dst.parent.exists():
+                    shutil.rmtree(dst.parent, ignore_errors=True)
+                shutil.copytree(root, dst)
+                build_root = dst
+                res.log.append("路径含非 ASCII：已复制到英文临时目录构建"
+                               "（aapt2 不认中文路径）")
+            except OSError as e:                    # noqa: BLE001
+                res.log.append(f"⚠ 复制到英文目录失败，继续原地构建（可能失败）：{e}")
+
+    tmp = build_root.parent / f"{build_root.name}_build"
+    unsigned = tmp / "unsigned.apk"
+    tmp.mkdir(parents=True, exist_ok=True)
 
     reg = registry()
     if not reg.has("apktool"):
@@ -329,11 +389,25 @@ def rebuild(unpack_dir: str | Path, out_apk: str | Path | None = None,
         return res
 
     t = reg.get("apktool")
-    cmd = t.cmd("b", root, "-o", unsigned)
+    cmd = t.cmd("b", build_root, "-o", unsigned)
     res.log.append("apktool b（smali 汇编 + 资源打包）")
     r = runner.run(cmd, timeout=timeout, on_line=on_line, log_name="apktool_build")
     if not r.ok or not unsigned.exists():
-        res.errors.append(f"apktool 编译失败 rc={r.rc}：{r.tail(8)}")
+        # 资源编译失败的常见可修原因：jpg/webp 改后缀冒充 .png。
+        # 不靠 apktool 的错误文本判断 —— 不同版本只把异常栈打出来，
+        # aapt2 的 "PNG signature" 那几行经常收不到。直接体检 res 目录，
+        # 有假 PNG 就转码重试一次，能救回「完整重建」（资源改动才生效）。
+        _fixed = _fix_fake_png(build_root)
+        if _fixed:
+            res.log.append(
+                f"资源里有 {len(_fixed)} 个假 PNG（jpg/webp 改后缀），"
+                "已转成真 PNG 后重试完整重建")
+            r = runner.run(cmd, timeout=timeout, on_line=on_line,
+                           log_name="apktool_build_retry")
+    if not r.ok or not unsigned.exists():
+        res.errors.append(
+            f"apktool 编译失败 rc={r.rc}：{r.tail(8)}"
+            "（资源编译类失败常见于 jpg 冒充 png、9-patch 损坏、资源被加密）")
         res.dur = time.time() - t0
         return res
     res.unsigned = str(unsigned)
@@ -636,3 +710,106 @@ def install(apk: str | Path, package: str = "", uninstall_first: bool = False) -
     if r.ok and "Success" in r.out:
         return True, "安装成功"
     return False, f"安装失败：{r.out.strip()[-300:] or r.tail(3)}"
+
+
+def package_of(root: str | Path) -> str:
+    """从解包目录的 AndroidManifest.xml 取包名（apktool 解出来是明文）。"""
+    p = Path(root) / "AndroidManifest.xml"
+    if not p.is_file():
+        return ""
+    try:
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    m = re.search(r'\bpackage\s*=\s*"([^"]+)"', txt)
+    return m.group(1) if m and "/" not in m.group(1) else ""
+
+
+def launch(package: str, wait: int = 5) -> dict:
+    """
+    装完必须真跑一次 —— 只 install 只证明"能装"，不证明"能开"。
+
+        清日志 → monkey 拉起 launcher → 等几秒 → 查进程还在不在 → 抓崩溃栈
+
+    进程没了 / 有 FATAL EXCEPTION，就是一开就崩。这时要的是崩溃栈，
+    不是"安装成功"这四个字。改包最常见的崩因：签名/摘要自校验没中和干净、
+    加固壳自毁、dex 完整性校验、环境检测（root/模拟器）当场退出。
+    """
+    res: dict = {"ok": False, "started": False, "alive": False, "pid": "",
+                 "crash": [], "log": "", "msg": ""}
+    if not devices():
+        res["msg"] = "没有连接的设备"
+        return res
+    if not package:
+        res["msg"] = "不知道包名，拉不起来（AndroidManifest 里没读到 package）"
+        return res
+    adb = registry().get("adb").prefix[0]
+    runner.run([adb, "logcat", "-c"], timeout=30)          # 只看这一次启动
+    r = runner.run([adb, "shell", "monkey", "-p", package,
+                    "-c", "android.intent.category.LAUNCHER", "1"], timeout=60)
+    out = (r.out or "") + (r.err or "")
+    if "No activities found" in out:
+        res["msg"] = "这个包没有可启动的 launcher（可能是插件包/子包）"
+        return res
+    res["started"] = ("Events injected" in out) or r.ok
+    time.sleep(max(1, int(wait)))
+
+    pid = runner.run([adb, "shell", "pidof", package], timeout=30)
+    res["pid"] = (pid.out or "").strip()
+    if not res["pid"]:                                     # 老系统没有 pidof
+        ps = runner.run([adb, "shell", "ps"], timeout=30)
+        for ln in (ps.out or "").splitlines():
+            if package in ln:
+                parts = ln.split()
+                res["pid"] = parts[1] if len(parts) > 1 else "?"
+                break
+    res["alive"] = bool(res["pid"])
+
+    log = runner.run([adb, "logcat", "-d", "-t", "800"], timeout=60)
+    res["log"] = log.out or ""
+    crash: list[str] = []
+    for ln in res["log"].splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if ("FATAL EXCEPTION" in s or "AndroidRuntime" in s
+                or "beginning of crash" in s
+                or (package in s and (" E " in s or s.startswith("E/")))):
+            crash.append(s)
+    res["crash"] = crash[-40:]
+
+    fatal = any("FATAL" in x for x in res["crash"])
+    res["ok"] = res["alive"] and not fatal
+    if res["ok"]:
+        res["msg"] = f"启动后进程存活（pid {res['pid']}），无崩溃栈"
+    elif not res["alive"]:
+        res["msg"] = "启动后进程已消失 —— 一开就退（崩溃或自杀）"
+    else:
+        res["msg"] = "进程在但抓到 FATAL 栈（闪退后可能被自动重启）"
+    return res
+
+
+_CRASH_HINTS = (
+    ("签名", ("signature", "Signature", "签名", "INSTALL_PARSE_FAILED")),
+    ("完整性/摘要", ("MessageDigest", "DigestException", "crc32", "CRC32",
+                 "checksum", "FileHash")),
+    ("原生层", ("SIGSEGV", "Fatal signal", "libc", "libnative", "JNI DETECTED")),
+    ("环境检测", ("emulator", "isEmulator", "test-keys", "su: not found",
+              "frida", "xposed", "ro.debuggable", "rooted")),
+    ("补丁自身", ("VerifyError", "Invalid instruction", "ClassNotFoundException",
+              "NoSuchMethodError", "NoClassDefFoundError",
+              "IllegalAccessError", "ArrayIndexOutOfBounds")),
+)
+
+
+def crash_hints(crash: list, log: str = "") -> list:
+    """把崩溃栈对到「改包四类崩因」上，让人不用自己翻日志猜。"""
+    txt = "\n".join(crash or []) + "\n" + (log or "")[-20000:]
+    out = []
+    for name, keys in _CRASH_HINTS:
+        hit = [k for k in keys if k.lower() in txt.lower()]
+        if hit:
+            out.append(f"崩因倾向「{name}」：命中 {hit[0]}")
+    if not out:
+        out.append("没命中已知崩因，把「设备日志.txt」发我，按栈定位")
+    return out

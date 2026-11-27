@@ -155,7 +155,9 @@ def inspect(apk: str | Path) -> ApkInfo:
         with zipfile.ZipFile(p) as z:
             for n in info.dex_files[:2]:
                 try:
-                    data = z.read(n)[:2_000_000]
+                    # 只读前 2MB：加固包会在 assets 塞几百 MB 的假 dex
+                    with z.open(n) as fp:
+                        data = fp.read(2_000_000)
                     h = dexmod.parse_header(data)
                     strs.extend(dexmod.read_strings(data, h, 8000))
                 except Exception:
@@ -390,7 +392,8 @@ class ApkPipeline:
             try:
                 with zipfile.ZipFile(self.apk) as z:
                     for n in info.dex_files:
-                        h = dexmod.parse_header(z.read(n)[:0x70])
+                        with z.open(n) as fp:      # 只要 dex 头 0x70 字节
+                            h = dexmod.parse_header(fp.read(0x70))
                         stats["dex_count"] += 1
                         stats["classes"] += h.class_defs_size
                         stats["methods"] += h.method_ids_size
@@ -435,8 +438,12 @@ class ApkPipeline:
         except OSError as e:
             self.result.errors.append(f"写 report.json 失败：{e}")
 
-        (rd / "report.md").write_text(_render_md(info, self.result), encoding="utf-8")
-        self.log(f"✓ 报告已写入 {rd}")
+        try:
+            (rd / "report.md").write_text(_render_md(info, self.result),
+                                          encoding="utf-8")
+            self.log(f"✓ 报告已写入 {rd}")
+        except OSError as e:
+            self.result.errors.append(f"写 report.md 失败：{e}")
 
     # ---- 只读汇总 ----
     def manifest_summary(self) -> str:

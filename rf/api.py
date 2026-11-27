@@ -298,10 +298,7 @@ class Api:
         """用 rizin 反汇编：给了函数名就只反汇编那个函数。"""
         p = self._need_file(path)
         t = self.tool("rizin")
-        script = "-A"
-        args = [p]
         if func:
-            cmds = f"-qc 'aaa;s sym.{func};pdf'"
             res = self.run([t.prefix[0], "-q", "-c", f"aa;pdf @ sym.{func}", p])
         else:
             res = self.run([t.prefix[0], "-q", "-c", "aa;pd " + str(limit), p])
@@ -673,6 +670,20 @@ class Api:
         ok, msg = patchmod.install(p, package, uninstall_first)
         self.log(("✓ " if ok else "⚠ ") + msg)
         return ok, msg
+
+    def patch_package(self, root: str | Path) -> str:
+        """从解包目录的 AndroidManifest.xml 读包名。"""
+        return patchmod.package_of(root)
+
+    def patch_launch(self, package: str, wait: int = 5) -> dict:
+        """装完真跑一次：拉起 launcher → 查进程存活 → 抓崩溃栈。"""
+        res = patchmod.launch(package, wait)
+        self.log(("✓ " if res.get("ok") else "⚠ ") + str(res.get("msg", "")))
+        return res
+
+    def patch_crash_hint(self, crash: list, log: str = "") -> list:
+        """崩溃栈 → 崩因分类（签名/完整性/原生层/环境检测/补丁自身）。"""
+        return patchmod.crash_hints(crash, log)
 
     def adb_logcat(self, lines: int = 200, package: str = "") -> str:
         """抓设备日志（需要 adb 与已连接设备）。"""

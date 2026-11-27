@@ -112,13 +112,25 @@ class ElfInfo:
 def parse_elf(path: str | Path) -> ElfInfo:
     p = Path(path)
     info = ElfInfo(path=str(p))
+    _MAX = 512 << 20
     try:
-        data = p.read_bytes()
+        size = p.stat().st_size
+        if size > _MAX:
+            # 1GB 的镜像/固件全读进来会直接吃掉内存，只分析前 512MB（头+节表都在前面）
+            info.warns.append(f"文件 {size >> 20}MB 超过 512MB，只分析前 512MB")
+            with p.open("rb") as f:
+                data = f.read(_MAX)
+        else:
+            data = p.read_bytes()
     except OSError as e:
         info.warns.append(str(e))
         return info
     if data[:4] != b"\x7fELF":
         info.warns.append("不是 ELF 文件")
+        return info
+    # 只有 4 字节魔数就往下走，data[4] 会 IndexError；ELF32 头最小 52 字节
+    if len(data) < 52:
+        info.warns.append(f"ELF 头被截断（只有 {len(data)} 字节）")
         return info
 
     info.is_elf = True
@@ -309,8 +321,15 @@ class PeInfo:
 def parse_pe(path: str | Path) -> PeInfo:
     p = Path(path)
     info = PeInfo(path=str(p))
+    _MAX = 512 << 20
     try:
-        data = p.read_bytes()
+        size = p.stat().st_size
+        if size > _MAX:
+            info.warns.append(f"文件 {size >> 20}MB 超过 512MB，只分析前 512MB")
+            with p.open("rb") as f:
+                data = f.read(_MAX)
+        else:
+            data = p.read_bytes()
     except OSError as e:
         info.warns.append(str(e))
         return info

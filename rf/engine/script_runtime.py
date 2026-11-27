@@ -109,8 +109,15 @@ def parse_meta(path: str | Path) -> ScriptMeta:
                 except ValueError:
                     default = 0
             elif ptype == "choice":
-                choices = [c.strip() for c in spec.split(",") if c.strip()]
-                default = choices[-1] if choices else ""
+                # 语法：[choice:a,b,c] 或 [choice:a,b,c:b]（最后一段带 :默认值）
+                parts = [c.strip() for c in spec.split(",") if c.strip()]
+                dflt = ""
+                if parts and ":" in parts[-1]:
+                    last, dflt = parts[-1].split(":", 1)
+                    parts[-1] = last.strip()
+                    dflt = dflt.strip()
+                choices = parts
+                default = dflt or (choices[0] if choices else "")
             else:
                 default = spec
         meta.params.append(Param(name=pname, label=rest or pname,
@@ -255,9 +262,22 @@ class ScriptRun:
         self._t0 = time.time()
         path = self.script
         try:
-            src = path.read_text(encoding="utf-8")
+            raw = path.read_bytes()
         except OSError as e:
             self._fail(f"读不到脚本：{e}")
+            return
+        # 脚本可能是 UTF-8（带/不带 BOM）或 GBK —— 用户在记事本里存过一次
+        # 就变 GBK，直接 read_text(utf-8) 会抛 UnicodeDecodeError（不是 OSError，
+        # 原来的 except 接不住），线程静默死掉，GUI 永远停在"运行中"。
+        src = ""
+        for enc in ("utf-8-sig", "gb18030"):
+            try:
+                src = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if not src:
+            self._fail("脚本编码无法识别（既不是 UTF-8 也不是 GBK），另存为 UTF-8 再试")
             return
 
         self._emit_log(f"▶ 运行脚本 {path.name}")
@@ -327,6 +347,10 @@ class ScriptRun:
     def _fail(self, msg: str) -> None:
         self._emit_log("✗ " + msg)
         self._push(ScriptEvent(kind="error", text=msg))
+        # 必须补一条 done：只发 error 的话 GUI 永远停在"运行中"，
+        # 开始按钮永久禁用，整页没有任何恢复入口。
+        self._push(ScriptEvent(kind="done", ok=False,
+                               dur=max(0.0, time.time() - self._t0), text=msg))
 
 
 # ---------------------------------------------------------------------------

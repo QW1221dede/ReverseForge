@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -101,6 +102,8 @@ class App(_ROOT_BASE):
         self._tools_ready = False
         self._pct = 0
         self._last_dir: Path | None = None
+        self._closing = False        # 关闭窗口时置位，三个 pump 见到就停
+        self._ui_q: "queue.Queue" = queue.Queue()   # 后台线程 → 主线程的 UI 投递
 
         self._build_menu()
         self._build_header()
@@ -338,8 +341,8 @@ class App(_ROOT_BASE):
         api.log = lambda m: lines.append(str(m))
         try:
             for i, p in enumerate(paths[:40]):
-                self.after(0, self.lbl_status.configure,
-                           {"text": f"分析 {i + 1}/{min(len(paths), 40)}：{Path(p).name}"})
+                self._post(self.lbl_status.configure,
+                           text=f"分析 {i + 1}/{min(len(paths), 40)}：{Path(p).name}")
                 try:
                     kind = api.file_type(p)
                     if kind.category == "encrypted":
@@ -352,8 +355,8 @@ class App(_ROOT_BASE):
                     api.log(f"  ! {Path(p).name}: {e}")
         finally:
             text = "\n".join(lines) + "\n"
-            self.after(0, self._term, text, "ok")
-            self.after(0, self.lbl_status.configure, {"text": "投放区分析完成"})
+            self._post(self._term, text, "ok")
+            self._post(self.lbl_status.configure, text="投放区分析完成")
 
     # ---------------- 右：终端 / 产物 / 报告 ----------------
     def _build_right(self, root: tk.Frame) -> None:
@@ -585,7 +588,12 @@ class App(_ROOT_BASE):
                      font=T.UI_FONT_S, anchor="w", width=11).pack(side="left")
 
             if p.ptype == "choice":
-                var = tk.StringVar(value=str(p.default or (p.choices[0] if p.choices else "")))
+                # 默认值必须在候选里：脚本写错或者改了候选，StringVar 里留一个
+                # 不存在的值（如 "pack:all"）会原样传给脚本，执行范围直接错。
+                d0 = str(p.default or "")
+                if d0 not in p.choices:
+                    d0 = p.choices[0] if p.choices else ""
+                var = tk.StringVar(value=d0)
                 cbx = ttk.Combobox(row, textvariable=var, values=p.choices,
                                    state="readonly", width=14)
                 cbx.pack(side="left", fill="x", expand=True)
@@ -680,6 +688,11 @@ class App(_ROOT_BASE):
     def _run(self) -> None:
         if self.run and self.run.alive:
             return
+        # 两个入口互斥：左侧「开始」和全自动页会抢同一个临时目录、同一个桌面文件名
+        auto = getattr(self, "_auto_run", None)
+        if auto and auto.alive:
+            messagebox.showinfo("正在运行", "全自动化页还有任务在跑，等它结束再开始。")
+            return
         if not self.current:
             messagebox.showinfo("提示", "先在左侧选一个脚本。")
             return
@@ -689,6 +702,11 @@ class App(_ROOT_BASE):
         try:
             fresh = parse_meta(meta.file)
             if fresh.params:
+                # 参数集合变了（新增/改名）→ 旧控件收集不到新参数，
+                # 必须先重建表单，否则新参数静默取默认值、file 参数还会报"没放文件"
+                if set(p.name for p in fresh.params) != set(self.param_vars):
+                    self.current = fresh
+                    self._render_params(fresh)
                 meta = fresh
         except Exception:
             pass
@@ -731,10 +749,33 @@ class App(_ROOT_BASE):
         self.lbl_status.configure(text=f"正在运行：{meta.name}")
         self.nb.select(0)
 
+    def _post(self, fn, *a, **kw) -> None:
+        """
+        后台线程 → 主线程的 UI 投递。
+
+        tkinter 不是线程安全的：工作线程直接 after()/configure()，在
+        主线程忙或窗口已销毁时会抛 "main thread is not in main loop"
+        甚至崩进程。统一进队列，由常驻的 _pump 在主线程执行。
+        """
+        try:
+            self._ui_q.put((fn, a, kw))
+        except Exception:                            # noqa: BLE001
+            pass
+
     def _pump(self) -> None:
         """每 60ms 收一次事件 —— GUI 唯一的输入源，绝不阻塞。"""
         try:
+            while True:
+                fn, a, kw = self._ui_q.get_nowait()
+                try:
+                    fn(*a, **kw)
+                except Exception:                    # noqa: BLE001
+                    pass
+        except queue.Empty:
+            pass
+        try:
             if self.run:
+                done_seen = False
                 for ev in self.run.poll():
                     if ev.kind == "log":
                         self._term(ev.text, self._classify(ev.text))
@@ -746,9 +787,17 @@ class App(_ROOT_BASE):
                         for line in tb.splitlines()[1:]:
                             self._term("   " + line, "muted")
                     elif ev.kind == "done":
+                        done_seen = True
                         self._finish(ev.ok, ev.dur)
+                # 兜底：线程已经结束却没送来 done（进程被强杀、线程里抛
+                # SystemExit/BaseException、回调吞异常）→ 必须在这里收尾，
+                # 否则界面永久停在"运行中"，按钮再也点不了。
+                if not done_seen and self.run is not None and not self.run.alive:
+                    self._finish(False, 0.0)
         except Exception:
             pass
+        if self._closing:
+            return
         self.after(60, self._pump)
 
     def _finish(self, ok: bool, dur: float) -> None:
@@ -758,10 +807,13 @@ class App(_ROOT_BASE):
             self._set_pct(100)
             self.lbl_status.configure(text=f"完成 · {dur:.1f}s")
             self._term(f"✓ 完成，用时 {dur:.1f}s", "ok")
-            self._refresh_artifacts()
-            self._load_report()
         else:
             self.lbl_status.configure(text=f"失败 · {dur:.1f}s")
+            self._term("✗ 本轮没有正常收尾（失败/被终止），产物以磁盘为准", "err")
+        # 成功失败都刷新：失败时也要清掉上一轮的树和报告，
+        # 否则界面显示的是上一个任务的产物，看着像这次跑出来了。
+        self._refresh_artifacts()
+        self._load_report()
         self.run = None
 
     def _set_pct(self, pct: int) -> None:
@@ -775,9 +827,15 @@ class App(_ROOT_BASE):
     def _stop(self) -> None:
         n = runner.kill_all()
         if n:
-            self._term(f"⏹ 已终止 {n} 个正在执行的工具进程", "warn")
+            self._term(f"⏹ 已终止 {n} 个正在执行的工具进程（含子进程树）", "warn")
         else:
             self._term("⏹ 当前没有可终止的子进程（脚本可能在纯 Python 步骤里）", "warn")
+        # 子进程杀掉了，但脚本线程本身杀不掉（纯 Python 循环）。
+        # 界面必须立刻恢复可用，否则"运行中"永远挂着；脚本的后续输出
+        # 会进队列但没人再读，无害。
+        if self.run is not None:
+            self._term("⏹ 本轮按终止处理，界面已恢复（线程可能在后台跑完）", "warn")
+            self._finish(False, 0.0)
 
     # ==================================================================
     # 产物 / 报告
@@ -802,11 +860,20 @@ class App(_ROOT_BASE):
             self.lbl_out.configure(text="（尚未产生产物）")
             return
         self.lbl_out.configure(text=str(d))
+        # 全局节点预算：只限深度是不够的（3 层 × 400 可以到 16 万节点，
+        # 建树在主线程，会把窗口冻住几十秒）。
+        self._tree_budget = 1200
         self._fill_tree("", d, depth=0)
+        if getattr(self, "_tree_budget", 1) <= 0:
+            try:
+                self.tree.insert("", "end", text="   … 产物太多，其余未显示（用「打开目录」看全）",
+                                 values=("", ""))
+            except Exception:
+                pass
 
     def _fill_tree(self, parent: str, path: Path, depth: int) -> None:
-        """只展开两层，避免产物里有几万个文件时把界面卡死。"""
-        if depth > 2:
+        """只展开两层 + 全局节点上限，避免产物里有几万个文件时把界面卡死。"""
+        if depth > 2 or getattr(self, "_tree_budget", 0) <= 0:
             return
         try:
             items = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -819,18 +886,34 @@ class App(_ROOT_BASE):
                 size = ""
             icon = "📁 " if it.is_dir() else "   "
             try:
+                # 绝对路径存进 values：显示文本被 strip / 带图标，反推路径会错
                 node = self.tree.insert(parent, "end", text=icon + it.name,
-                                        values=(size,), open=(depth < 1))
+                                        values=(size, str(it)), open=(depth < 1))
             except Exception:
                 continue
+            self._tree_budget = getattr(self, "_tree_budget", 1) - 1
             if it.is_dir():
                 self._fill_tree(node, it, depth + 1)
+        if len(items) > 400:
+            try:
+                self.tree.insert(parent, "end",
+                                 text=f"   … 另有 {len(items) - 400} 项未显示",
+                                 values=("", ""))
+            except Exception:
+                pass
 
     def _open_tree_item(self, _evt=None) -> None:
         sel = self.tree.selection()
         if not sel or not self._last_dir:
             return
-        # 由节点文本逐级拼路径
+        # 优先用建树时存下的绝对路径（文件名首尾空格 + 图标前缀会让文本反推失效）
+        vals = self.tree.item(sel[0], "values")
+        if len(vals) >= 2 and str(vals[1]).strip():
+            target = Path(str(vals[1]))
+            if target.exists():
+                open_path(target)
+            return
+        # 旧节点兜底：由节点文本逐级拼路径
         parts = []
         cur = sel[0]
         while cur:
@@ -850,12 +933,28 @@ class App(_ROOT_BASE):
             self.report.configure(state="disabled")
             self.lbl_rep.configure(text="（尚未生成报告）")
             return
-        cands = list(d.rglob("report.md")) + list(d.rglob("*.md"))
-        if not cands:
+        # 16 号脚本的正式报告固定叫「全自动化报告.md」；其次 report.md；
+        # 再退到顶层任意 .md。不能直接 rglob("*.md") —— 解包目录里
+        # 常有 APK 自带的 README/CHANGELOG，取第一个就是错的。
+        f: Path | None = None
+        for rel in ("全自动化报告.md", "report.md"):
+            cand = d / rel
+            if cand.is_file():
+                f = cand
+                break
+        if f is None:
+            top = sorted((p for p in d.glob("*.md") if p.is_file()),
+                         key=lambda p: p.name)
+            if top:
+                f = top[0]
+        if f is None:
+            deep = sorted(p for p in d.rglob("*报告*.md") if p.is_file())
+            if deep:
+                f = deep[0]
+        if f is None:
             self.report.configure(state="disabled")
             self.lbl_rep.configure(text="（未找到 .md 报告）")
             return
-        f = cands[0]
         self.lbl_rep.configure(text=str(f))
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
@@ -884,9 +983,11 @@ class App(_ROOT_BASE):
                 reg = registry()
                 reg.build(force=force)
                 data = reg.status()
-                self.after(0, lambda: self._tools_done(data, force))
+                self._post(lambda: self._tools_done(data, force))
             except Exception as e:
-                self.after(0, lambda: self._tools_fail(str(e)))
+                # 必须把 e 绑成默认参数：except 块一结束 Python 就删掉这个名字，
+                # lambda 延后执行时 str(e) 会 NameError，工具探测失败反而静默。
+                self._post(lambda msg=str(e): self._tools_fail(msg))
 
         import threading
         threading.Thread(target=work, daemon=True).start()
@@ -1655,10 +1756,10 @@ class App(_ROOT_BASE):
         def work() -> None:
             try:
                 r = fn()
-                self.after(0, lambda: done(r, None))
+                self._post(lambda: done(r, None))
             except Exception as e:      # noqa: BLE001
                 err = e
-                self.after(0, lambda: done(None, err))
+                self._post(lambda err=err: done(None, err))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2003,10 +2104,22 @@ class App(_ROOT_BASE):
 
     # ==================================================================
     def _on_close(self) -> None:
-        if self.run and self.run.alive:
-            if not messagebox.askokcancel("确认退出", "脚本还在跑，退出会终止所有子进程。继续？"):
+        auto = getattr(self, "_auto_run", None)
+        busy = bool((self.run and self.run.alive) or (auto and auto.alive))
+        if busy:
+            if not messagebox.askokcancel(
+                    "确认退出", "还有任务在跑，退出会终止所有子进程。继续？"):
                 return
-            runner.kill_all()
+        self._closing = True                     # 让三个 pump 不再排下一次
+        try:
+            runner.kill_all()                    # 按进程树杀，apktool/java 不留孤儿
+        except Exception:                        # noqa: BLE001
+            pass
+        try:
+            if getattr(self, "_repl", None):
+                self._repl.stop()                # 常驻解释器（python.exe）一起收掉
+        except Exception:                        # noqa: BLE001
+            pass
         self.destroy()
 
 
@@ -2160,7 +2273,7 @@ class App(_ROOT_BASE):
             res = self._repl.run(src)
         except Exception as e:                       # noqa: BLE001
             err = f"{type(e).__name__}: {e}"
-        self.after(0, self._repl_done, res, err)
+        self._post(self._repl_done, res, err)
 
     def _repl_done(self, res, err: str = "") -> None:
         self._repl_busy = False
@@ -2408,6 +2521,8 @@ class App(_ROOT_BASE):
                     self._chat_append(item[1], "plan")
         except Exception:                            # noqa: BLE001  (空队列)
             pass
+        if self._closing:
+            return
         self.after(120, self._chat_pump)
 
     def _chat_refresh_engine(self) -> None:
@@ -2571,7 +2686,7 @@ class App(_ROOT_BASE):
                        selectcolor=T.PANEL2, borderwidth=0,
                        font=T.UI_FONT_S).pack(side="left", padx=12)
         self.auto_verify = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="装到设备验证（需 adb）", variable=self.auto_verify,
+        tk.Checkbutton(bar, text="装到设备并启动验证（需 adb）", variable=self.auto_verify,
                        bg=T.PANEL, fg=T.TEXT, activebackground=T.PANEL,
                        selectcolor=T.PANEL2, borderwidth=0,
                        font=T.UI_FONT_S).pack(side="left")
@@ -2626,6 +2741,9 @@ class App(_ROOT_BASE):
         if self._auto_run and self._auto_run.alive:
             self._fullauto_append("上一轮还在跑…", "meta")
             return
+        if self.run and self.run.alive:
+            messagebox.showinfo("正在运行", "左侧还有脚本在跑，等它结束再开全自动化。")
+            return
         files = getattr(self, "drop", None) and self.drop.files
         if not files:
             messagebox.showinfo("提示", "先把 APK 或文件拖到左上角投放区。")
@@ -2644,17 +2762,41 @@ class App(_ROOT_BASE):
             "to_desktop": bool(self.auto_desktop.get()),
             "run_verify": bool(self.auto_verify.get()),
         }
+        if len(files) > 1:
+            self._fullauto_append(
+                f"投放区有 {len(files)} 个目标，全自动化一次只跑一个："
+                f"本次取 {files[0].name}（批量请用左侧「批量」页）", "meta")
+
+        # 先清日志、先立 running 标志：脚本可能 100ms 内就失败（目标被删、
+        # apktool 缺失），那时 pump 还没看到 alive，标志为 False 就会让
+        # 5 个按钮永久禁用、整页没有任何恢复入口。
+        self.auto_log.configure(state="normal")
+        self.auto_log.delete("1.0", "end")
+        self.auto_log.configure(state="disabled")
+        self._auto_was_running = True
         for w in self._fullauto_btns:
             try:
                 w.configure(state="disabled")
             except Exception:                        # noqa: BLE001
                 pass
         self._fullauto_append(f"\n▶ 开始（{stage}）：" + str(files[0].path), "meta")
-        self._auto_run = ScriptRun(
-            script, params,
-            workdir=config.WORKSPACE_ROOT / f"{time.strftime('%m%d_%H%M%S')}_fullauto",
-            on_event=lambda ev: self._auto_q.put(ev))
-        self._auto_run.start()
+
+        workdir = config.WORKSPACE_ROOT / f"{time.strftime('%m%d_%H%M%S')}_fullauto"
+        # 产物页/报告页跟着这次跑，否则跑完整页还是空的（或指着上一个任务）
+        self._last_dir = workdir
+        try:
+            self._auto_run = ScriptRun(
+                script, params, workdir=workdir,
+                on_event=lambda ev: self._auto_q.put(ev))
+            self._auto_run.start()
+        except Exception as e:                       # noqa: BLE001
+            self._auto_was_running = False
+            self._fullauto_append(f"启动失败：{e}", "err")
+            for w in self._fullauto_btns:
+                try:
+                    w.configure(state="normal")
+                except Exception:                    # noqa: BLE001
+                    pass
 
     def _fullauto_pump(self) -> None:
         try:
@@ -2677,8 +2819,18 @@ class App(_ROOT_BASE):
                 except Exception:                    # noqa: BLE001
                     pass
             self._fullauto_append("■ 结束。报告与成品在「打开产物」里。", "meta")
+            # 收尾同步：产物树 + 报告页指向这一次的 workdir
+            try:
+                if run.ctx.workdir:
+                    self._last_dir = Path(run.ctx.workdir)
+                self._refresh_artifacts()
+                self._load_report()
+            except Exception:                        # noqa: BLE001
+                pass
         if run and run.alive:
             self._auto_was_running = True
+        if getattr(self, "_closing", False):
+            return                                   # 窗口在关，别再排 after
         self.after(150, self._fullauto_pump)
 
     def _fullauto_open(self) -> None:

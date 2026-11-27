@@ -209,7 +209,7 @@ python run.py --selfcheck     # 环境自检
 
 ```bash
 python build.py              # → dist/ReverseForge/ReverseForge.exe
-python release.py            # → release/ReverseForge_v0.1.0_win64.zip + SHA256
+python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 ```
 
 ---

@@ -84,6 +84,8 @@ def run_build(onefile: bool = False) -> int:
         "--hidden-import", "Crypto.Cipher.AES",
         "--hidden-import", "Crypto.Cipher.ChaCha20_Poly1305",
         "--hidden-import", "Crypto.Protocol.KDF",
+        # 资源里 jpg 改后缀冒充 .png 时用它转码（可选能力，缺了只是少一条修复路径）
+        "--hidden-import", "PIL.Image",
         "--exclude-module", "numpy",
         "--exclude-module", "matplotlib",
         "--exclude-module", "pandas",

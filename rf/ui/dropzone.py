@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import heapq
 import os
 import time
 import tkinter as tk
@@ -246,10 +247,14 @@ class FileDropZone(tk.Frame):
             p = Path(raw)
             if p.is_dir():
                 try:
-                    subs = [x for x in p.rglob("*") if x.is_file()]
+                    # 只留最大的 MAX_FILES 个：先物化再排序，几万文件的目录
+                    # 会在主线程上冻住整个窗口
+                    subs = heapq.nlargest(
+                        self.MAX_FILES,
+                        (x for x in p.rglob("*") if x.is_file()),
+                        key=_safe_size)
                 except OSError:
                     subs = []
-                subs.sort(key=lambda x: -_safe_size(x))
                 for sub in subs:
                     if added + len(self.files) >= self.MAX_FILES:
                         break

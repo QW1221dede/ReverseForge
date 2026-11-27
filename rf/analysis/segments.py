@@ -655,19 +655,26 @@ def carve(data: bytes, start: int, end: int) -> bytes:
 
 
 def carve_tail(target: str | Path | SegmentMap, sm: SegmentMap | None = None,
-               start: int | None = None) -> bytes:
-    """取出"密文部分"的字节，直接喂解密器。"""
+               start: int | None = None,
+               max_bytes: int = 256 << 20) -> bytes:
+    """
+    取出"密文部分"的字节，直接喂解密器。
+
+    按需 seek 读取，不整文件入内存（4GB 镜像取尾段会把内存吃光）；
+    超过 max_bytes 的部分截断 —— 解密器本身也有自己的预算。
+    """
     if sm is None:
         sm = target if isinstance(target, SegmentMap) else analyze(target)
-    if isinstance(target, (bytes, bytearray)):
-        data = bytes(target)
-    else:
-        try:
-            data = Path(sm.path).read_bytes()
-        except OSError:
-            return b""
     off = start if start is not None else (sm.split.head_end if sm.split.found else 0)
-    return data[off:]
+    off = max(0, int(off))
+    if isinstance(target, (bytes, bytearray)):
+        return bytes(target)[off:][:max_bytes]
+    try:
+        with Path(sm.path).open("rb") as f:
+            f.seek(off)
+            return f.read(max_bytes)
+    except OSError:
+        return b""
 
 
 def carve_segments(target: str | Path, out_dir: str | Path,

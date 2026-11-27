@@ -193,6 +193,13 @@ def _looks_text(sample: bytes) -> bool:
 # 解密：ZIP 弱口令
 # ---------------------------------------------------------------------------
 
+def _close_quiet(zf) -> None:
+    try:
+        zf.close()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def try_zip_password(path: str | Path, passwords: list[str] | None = None,
                      out_dir: str | Path | None = None,
                      on_try=None) -> DecryptResult:
@@ -209,6 +216,7 @@ def try_zip_password(path: str | Path, passwords: list[str] | None = None,
     infos = zf.infolist()
     enc = [i for i in infos if i.flag_bits & 0x1]
     if not enc:
+        _close_quiet(zf)
         res.note = "该 ZIP 未加密，无需口令"
         res.ok = True
         res.method = "none"
@@ -251,6 +259,7 @@ def try_zip_password(path: str | Path, passwords: list[str] | None = None,
             res.note = f"命中口令但解包失败：{e}"
     elif not res.ok:
         res.note = f"试了 {res.tried} 个常见口令未命中；ZIP 用的是 AES 或强口令，需字典/已知明文攻击"
+    _close_quiet(zf)                       # 批量试口令时不显式关会攒句柄、锁住文件
     return res
 
 
@@ -418,7 +427,8 @@ def find_hardcoded_keys(path: str | Path, max_hits: int = 40) -> list[tuple[str,
 
     for f in targets:
         try:
-            raw = f.read_bytes()[:4_000_000]
+            with f.open("rb") as fh:            # 大 so/dex 只扫前 4MB
+                raw = fh.read(4_000_000)
         except OSError:
             continue
 

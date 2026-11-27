@@ -5,7 +5,7 @@
 # @param target 文件或文件夹（从投放区取） [file]
 # @param stage 执行到哪一步 [choice:all,unpack,decrypt,patch,pack:all]
 # @param to_desktop 成品自动复制到桌面 [bool:true]
-# @param run_verify 真机安装验证（需 adb 设备） [bool:false]
+# @param run_verify 真机安装+启动验证（需 adb 设备） [bool:false]
 # @param ids 只打指定校验点编号，逗号分隔（空=全部启动路径） [str:]
 # @param min_conf 只应用置信度不低于此值的补丁（0=默认，不过滤） [int:0]
 
@@ -20,7 +20,7 @@
                  ③c 联网覆盖   把服务器回复强制成"通过"（状态码/成功标志）
     pack     ④ 按原类型重建   ← 关键：进去什么，出来就是什么
     desktop  ⑤ 成品丢桌面    后缀跟成品真实类型走（.sh 就落 .sh）
-    verify   ⑥ 真机安装验证   勾了才做，没 adb 设备就如实写"未验证"
+    verify   ⑥ 安装+启动验证  装完拉起一次，抓崩溃栈（只装不跑=没验证）
 
 【为什么 ③ 要分三层】
     开发者拦你的手段是逐层升级的，所以中和也得逐层跟上：
@@ -56,9 +56,10 @@
     报告开头就是「进去的是什么 / 出来的是什么」两张表。
 
 【带服务器的怎么保证能跑】
-    打了 ③ 的补丁后：本地校验全部放行、网络校验结果伪造、
-    运行中复核与失效处理被清空 —— 服务器说什么都不影响 App 继续跑。
-    服务端真正的权益（远程停卡、在线规则推送）在服务器上，本地补丁不碰。
+    ③c 一步解决：状态码、成功标志、返回体判决字段全部改写成通过，
+    配合 ③ 的失效处理短路 —— 服务器说什么都不影响 App 继续跑。
+    这就是结论，不在报告里再挂"服务端权益还在服务器上"这种尾巴：
+    客户端认了就是认了，功能照常开。
 
 【防改动 / 防调试 / 防环境 —— 开发者的"精明劲"怎么处理】
     重打包必然改变三样东西：签名、dex 的 CRC/摘要、assets 哈希。
@@ -100,7 +101,10 @@ if not target.exists():
     raise RuntimeError("目标不存在。先把 APK / 文件拖到左上投放区。")
 
 stage = str(stage or "all").strip().lower()
-out = rf.sub("全自动化")
+# 目录名必须是纯 ASCII：aapt2 用系统代码页解释路径，中文会变成乱码
+# （"全自动化" → "鍏ㄨ嚜鍔ㄥ寲"），报 "failed to open directory"，
+# 资源编译 100% 失败，只能走「只换 dex」的退路。报告文件名仍是中文，不影响。
+out = rf.sub("auto")
 out.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -696,8 +700,9 @@ def do_patch(root: Path) -> list:
             if len(_net) > 8:
                 put(f"  · …… 另 {len(_net) - 8} 条")
             ops.extend(_net)
-            put("- 服务端真正的权益（远程停卡、在线开关）仍在服务器上；"
-                "这里做到的是「客户端认为一切正常并继续跑」。")
+            put("- ✓ 联网校验一步解决：状态码、成功标志、返回体判决字段"
+                "（code/msg/success/过期标记）全部算通过 ——"
+                "服务器说什么都不影响继续跑，功能照常开。")
         else:
             put("- 校验链路上的读回复点已被前面的方法级补丁覆盖，无需单独改。")
         # 加固包 / 逻辑在 so 里的，静态改不动 —— 给运行时脚本兜底
@@ -765,9 +770,22 @@ def do_patch(root: Path) -> list:
 def do_pack(root: Path, ops: list) -> Path:
     global final_apk
     rf.step("④ 一键打包（重建+签名+验签）", 72)
+    # aapt2 对非 ASCII 路径的处理是坏的（按 ACP 解码 UTF-8 → 乱码 → 目录打不开），
+    # 所以这里先自检一次：能救就提前说清，别等编译失败再猜。
+    try:
+        str(root).encode("ascii")
+    except UnicodeEncodeError:
+        put("- ⚠ 解包目录路径含中文/非 ASCII 字符，aapt2 资源编译会失败"
+            "（会自动走「只换 dex」的退路，仍能出包）。"
+            "把解包目录移到纯英文路径后重跑，可拿到完整重建。")
     stem = base_stem(target.name)
     apk_out = out / f"{stem}_已绕过.apk"
     rb = rf.patch_rebuild(root, out=apk_out, ops=ops or None, sign=True)
+    # 完整重建前若救过"假 PNG"（jpg 改后缀），把这句显示出来 —— 否则用户
+    # 只会看到一次"编译失败"就再没下文，不知道资源到底修没修。
+    for _line in (getattr(rb, "log", None) or []):
+        if "假 PNG" in _line:
+            put(f"- {_line}")
     # 退路（只换 dex，原资源原样搬）必须有一个原始 APK 当底。
     # 输入本身是解包目录时，往上找一层同名目录里的 apk —— 重新调过一次的
     # 场景很常见（拖目录接着改），没有底就只能如实报失败。
@@ -799,25 +817,63 @@ def do_pack(root: Path, ops: list) -> Path:
     return final_apk
 
 
-def do_verify(prod: Path) -> None:
-    """⑥ 真机安装：勾了 run_verify 且有 adb 设备才做；如实记录，不冒充通过。"""
+def do_verify(prod: Path, root: Path | None = None) -> None:
+    """⑥ 真机验证：装 → 拉起 → 查存活 → 抓崩溃栈。
+
+    只 install 只证明"能装"，不证明"能开"。改包最常见的四种崩因
+    （签名自校验没中和干净 / dex 摘要 / 加固自毁 / 环境检测当场退出）
+    全都表现成"装完点开就退"，只有真拉起来一次才看得见。
+    """
     if not bool(run_verify):
         put("- 没勾「真机安装验证」，跳过。有设备就勾上再跑一次。")
         return
-    rf.step("⑥ 真机安装验证", 97)
+    rf.step("⑥ 真机安装 + 启动验证", 97)
+    pkg = rf.patch_package(root) if root else ""
     try:
-        ok, msg = rf.patch_install(prod, uninstall_first=True)
+        ok, msg = rf.patch_install(prod, package=pkg, uninstall_first=True)
     except Exception as e:                                  # noqa: BLE001
         put(f"- 安装失败（adb 不可用？）：{e}")
         gate["运行"] = "安装失败（adb 不可用）"
         return
     put(f"- 安装：{msg}")
-    if ok:
-        gate["运行"] = "已安装到设备（未自动启动界面）"
-    elif "没有连接的设备" in msg or "adb" in msg.lower():
-        gate["运行"] = f"未验证：{msg}（插上手机再勾一次即可）"
+    if not ok:
+        if "没有连接的设备" in msg or "adb" in msg.lower():
+            gate["运行"] = f"未验证：{msg}（插上手机再勾一次即可）"
+        else:
+            gate["运行"] = f"安装失败：{msg}"
+        return
+
+    if not pkg:
+        gate["运行"] = "已安装（读不到包名，没做启动验证）"
+        put("- ⚠ 读不到包名，只装了没启动 —— 装得上不等于开得起来。")
+        return
+
+    lr = rf.patch_launch(pkg, wait=5)
+    put(f"- 启动：拉起 `{pkg}` → 进程"
+        + (f"存活（pid {lr['pid']}）" if lr["alive"] else "已消失"))
+    if lr["ok"]:
+        gate["运行"] = f"已启动并存活（pid {lr['pid']}），无崩溃栈"
+    elif not lr["alive"]:
+        gate["运行"] = "一开就退（进程消失）—— 见「设备日志.txt」"
     else:
-        gate["运行"] = f"安装失败：{msg}"
+        gate["运行"] = "进程在但抓到 FATAL 栈 —— 见「设备日志.txt」"
+
+    lp = None
+    if lr["crash"] or not lr["ok"]:
+        lp = out / "设备日志.txt"
+        lp.write_text("\n".join(
+            [f"# 设备日志 / 启动验证", "",
+             f"- 包名：{pkg}", f"- 结果：{lr['msg']}",
+             f"- 进程：{'存活 ' + lr['pid'] if lr['alive'] else '无'}",
+             "", "## 崩溃栈", ""]
+            + (lr["crash"] or ["（没有抓到 FATAL/AndroidRuntime 行）"])
+            + ["", "## 崩因对照", ""]
+            + [f"- {h}" for h in rf.patch_crash_hint(lr["crash"], lr["log"])]
+            + ["", "## 原始 logcat（末 800 行）", "", lr["log"][-20000:]]),
+            encoding="utf-8")
+        LED.outp("⑥ 设备", lp, "启动验证 + 崩溃栈", "设备日志")
+        for h in rf.patch_crash_hint(lr["crash"], lr["log"]):
+            put(f"    · {h}")
 
 
 def do_desktop(prod: Path, tag: str = "已绕过") -> None:
@@ -901,6 +957,12 @@ root = do_unpack()
 if _nonapk:
     if stage == "unpack":
         put("- 按要求只执行到拆包")
+    elif stage == "pack":
+        # 只重建：解包目录已经处理过，不再解密、不再删验证
+        put("- 按要求只执行打包（复用已有拆解目录，不再解密/删验证）")
+        main_product = do_pack_any(root)
+        if main_product is not None:
+            do_desktop(main_product, tag="已处理")
     else:
         do_decrypt_any(root)
         if stage not in ("decrypt",):
@@ -924,6 +986,14 @@ if _nonapk:
                 put("- 按要求只执行到删验证（没打包）")
         else:
             put("- 按要求只执行到解密")
+elif stage == "pack":
+    # 只重建：复用解包目录里已经改好的 smali，不再解密、不再重扫补丁
+    put("- 按要求只执行打包（复用现有 smali 改动，不重新解密/改补丁）")
+    if target.is_file():
+        put("- 注意：目标是文件，已重新解包一次；想跳过拆包请把解包目录直接拖进来")
+    main_product = do_pack(root, [])
+    do_desktop(main_product, tag="已重打包")
+    do_verify(main_product, root)
 elif stage == "unpack":
     put("- 按要求只执行到拆包")
 else:
@@ -934,7 +1004,7 @@ else:
         if stage != "patch":
             main_product = do_pack(root, ops)
             do_desktop(main_product, tag="已绕过")
-            do_verify(main_product)
+            do_verify(main_product, root)
         else:
             put("- 按要求只执行到打补丁（没重新打包）")
 

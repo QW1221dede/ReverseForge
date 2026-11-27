@@ -298,7 +298,10 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         p = Path(target)
         rep.path = str(p)
         try:
-            data = p.read_bytes()[:max_bytes]
+            # 只读前 max_bytes —— read_bytes() 会先把整文件塞进内存再切片，
+            # 对几 GB 的镜像等于直接把内存吃光。
+            with p.open("rb") as f:
+                data = f.read(max_bytes)
         except OSError as e:
             rep.notes.append(f"读不了：{e}")
             return rep
@@ -582,6 +585,9 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             if klen % d == 0 and d not in lens:
                 lens.append(d)
     for klen in lens[:14]:
+        if time.time() > deadline:          # 全文异或是纯 Python，必须能被打断
+            rep.stopped_early = True
+            break
         dec, key = C.xor_break_repeating(sample, klen)
         if not dec or not key:
             continue

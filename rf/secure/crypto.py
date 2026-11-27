@@ -94,8 +94,20 @@ class Sealed:
             head = json.loads(blob[off:off + hlen].decode("utf-8"))
         except Exception as e:
             raise CryptoError(f"信封头损坏：{e}") from e
+        if not isinstance(head, dict):
+            raise CryptoError("信封头不是 JSON 对象")
+        for need in ("alg", "kdf", "rounds", "salt", "nonce"):
+            if need not in head:
+                raise CryptoError(f"信封头缺字段：{need}")
+        # rounds 直接取自文件头：被改成一个天文数字就能让 PBKDF2 跑几小时
+        try:
+            rounds = int(head["rounds"])
+        except (TypeError, ValueError):
+            rounds = 0
+        if rounds < 0 or rounds > 2_000_000:
+            raise CryptoError(f"信封声明的 KDF 轮数不合理：{rounds}")
         return cls(
-            alg=head["alg"], kdf=head["kdf"], rounds=int(head["rounds"]),
+            alg=head["alg"], kdf=head["kdf"], rounds=rounds,
             salt=base64.b64decode(head["salt"]),
             nonce=base64.b64decode(head["nonce"]),
             tag=base64.b64decode(head.get("tag", "")),
@@ -339,7 +351,8 @@ def selftest(rounds: int = 3, payload_kb: int = 64) -> dict:
             "结果": "通过" if len(ct) == len(big) and len(tag) == TAG_LEN else "异常",
         })
 
-    # HMAC / 派生（标准库，必定可测）    t0 = time.perf_counter()
+    # HMAC / 派生（标准库，必定可测）
+    t0 = time.perf_counter()
     tag = hmac_sign(payload, pw)
     ok_hmac = hmac_verify(payload, pw, tag) and not hmac_verify(payload + b"x", pw, tag)
     out["cases"].append({"算法": "HMAC-SHA256",

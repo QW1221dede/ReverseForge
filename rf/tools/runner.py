@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import queue
 import re
@@ -86,17 +87,40 @@ _RUNNING: "set[subprocess.Popen]" = set()
 _RUN_LOCK = threading.Lock()
 
 
+def _kill_tree(proc: "subprocess.Popen") -> bool:
+    """
+    杀整棵进程树。
+
+    Windows 上 proc.kill() 只结束直接子进程；jadx/apktool 是 .bat，
+    真正干活的是它拉起的 java.exe —— 只杀 cmd 会留下孤儿继续写 output 目录，
+    下一次运行就会读到半成品。有 taskkill 就 /T /F 按树杀。
+    """
+    if os.name == "nt":
+        try:
+            r = subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True, timeout=20,
+                creationflags=_NO_WINDOW if "_NO_WINDOW" in globals() else 0,
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:                                   # noqa: BLE001
+            pass
+    try:
+        proc.kill()
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
 def kill_all() -> int:
-    """杀掉所有正在执行的子进程。返回杀掉的个数。"""
+    """杀掉所有正在执行的子进程（含孙进程）。返回杀掉的个数。"""
     with _RUN_LOCK:
         procs = list(_RUNNING)
     n = 0
     for p in procs:
-        try:
-            p.kill()
+        if _kill_tree(p):
             n += 1
-        except Exception:
-            pass
     return n
 
 
@@ -201,7 +225,9 @@ def run(
         _write_log(log_path, res)
         return res
 
-    buf: list[str] = []
+    # 输出上限：ghidra/jadx 能吐几十万行，全留会撑爆内存。
+    # 只保留最后 2 万行 —— 报错永远在尾部，前面的进度条没用。
+    buf: "collections.deque[str]" = collections.deque(maxlen=20000)
     t = threading.Thread(
         target=_decoder_stream, args=(proc.stdout, on_line, buf), daemon=True
     )
@@ -214,10 +240,7 @@ def run(
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         res.timed_out = True
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_tree(proc)                    # 整棵树，别留 java 孤儿
         try:
             proc.wait(timeout=5)
         except Exception:

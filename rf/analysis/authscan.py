@@ -944,8 +944,9 @@ def _scan_java_container(p: Path, aid_start: int, min_conf: int) -> list[AuthPoi
             blobs = [(p.name, p.read_bytes())]
         else:
             with zipfile.ZipFile(p) as z:
-                blobs = [(n, z.read(n)) for n in z.namelist()
-                         if n.endswith(".class")][:300]
+                # 先按名字截断，再逐个读 —— 不能先读全部再 [:300]
+                names = [n for n in z.namelist() if n.endswith(".class")][:300]
+                blobs = [(n, z.read(n)) for n in names]
     except (OSError, zipfile.BadZipFile) as e:
         return [AuthPoint(aid="A?", file=str(p), lang=L_JAVA, kind=K_UNKNOWN,
                           confidence=0, code="", evidence=f"读不了：{e}")]

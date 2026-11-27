@@ -457,15 +457,21 @@ def _pe_detail(data: bytes, more) -> tuple[str, str, bool, list[str]]:
         lfanew = struct.unpack_from("<I", data, 0x3C)[0]
     except struct.error:
         return "PE", "", False, notes
-    need = lfanew + 24 + 240 + 40 * 4
+    # 伪造/损坏的 e_lfanew 可以指向 4GB 之外：more() 会照着这个偏移去读，
+    # 一次就把内存吃光。真正的 PE 头不会跑出前 16MB。
+    if lfanew > (16 << 20):
+        return "PE（头损坏：e_lfanew 越界）", "", False, ["e_lfanew 指向文件外"]
     buf = data
     if lfanew + 24 > len(buf):
         buf = more(lfanew + 0x400)
     if len(buf) < lfanew + 24 or buf[lfanew:lfanew + 4] != b"PE\x00\x00":
         return "PE（签名缺失，可能是自解压头）", "", False, ["有 MZ 但没有 PE 签名"]
-    machine, nsec = struct.unpack_from("<HH", buf, lfanew + 4)
-    opt_size = struct.unpack_from("<H", buf, lfanew + 20)[0]
-    chars = struct.unpack_from("<H", buf, lfanew + 22)[0]
+    try:
+        machine, nsec = struct.unpack_from("<HH", buf, lfanew + 4)
+        opt_size = struct.unpack_from("<H", buf, lfanew + 20)[0]
+        chars = struct.unpack_from("<H", buf, lfanew + 22)[0]
+    except struct.error:                                  # 截断在头中间
+        return "PE（头被截断）", "", False, ["PE 头字段不全"]
     arch = _MACHINE.get(machine, f"0x{machine:04X}")
 
     is_dll = bool(chars & 0x2000)
@@ -475,11 +481,14 @@ def _pe_detail(data: bytes, more) -> tuple[str, str, bool, list[str]]:
     dotnet = False
     opt_off = lfanew + 24
     if opt_size >= 224 and machine in (0x014C, 0x8664):
-        magic = struct.unpack_from("<H", buf, opt_off)[0]
-        dd = opt_off + (96 if magic == 0x10B else 112)
-        if dd + 8 * 15 <= len(buf):
-            clr_rva, clr_size = struct.unpack_from("<II", buf, dd + 8 * 14)
-            dotnet = clr_rva != 0 and clr_size != 0
+        try:
+            magic = struct.unpack_from("<H", buf, opt_off)[0]
+            dd = opt_off + (96 if magic == 0x10B else 112)
+            if dd + 8 * 15 <= len(buf):
+                clr_rva, clr_size = struct.unpack_from("<II", buf, dd + 8 * 14)
+                dotnet = clr_rva != 0 and clr_size != 0
+        except struct.error:
+            pass
     if dotnet:
         label = ("C# / .NET 动态库" if is_dll else "C# / .NET 可执行")
         notes.append("托管程序集，可直接用 dnSpy/ILSpy 反编译")

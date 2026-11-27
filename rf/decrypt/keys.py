@@ -169,7 +169,8 @@ def from_file(path: str | Path, binary_ok: bool = True) -> list[KeyCand]:
     """单个文件捞一遍。文本按内容搜，二进制先抽可打印串再搜。"""
     p = Path(path)
     try:
-        raw = p.read_bytes()[:8 * 1024 * 1024]
+        with p.open("rb") as f:                 # 只读前 8MB，别把几 GB 的 so 整个吞下
+            raw = f.read(8 * 1024 * 1024)
     except OSError:
         return []
     if not raw:

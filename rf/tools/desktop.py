@@ -45,9 +45,12 @@ def desktop_dir() -> Path:
             subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy",
                             "Bypass", "-File", str(sp)],
                            capture_output=True, timeout=20, creationflags=flags)
-            d = Path(p.read_text(encoding="utf-8").strip())
-            if d.is_dir():
-                return d
+            txt = p.read_text(encoding="utf-8", errors="ignore").strip()
+            # 空字符串会让 Path("") 变成 "."，is_dir() 为真 → 成品落到当前目录
+            if txt and Path(txt).is_absolute():
+                d = Path(txt)
+                if d.is_dir():
+                    return d
         finally:
             for f in (p, sp):
                 try:
