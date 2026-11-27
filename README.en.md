@@ -1,36 +1,19 @@
 # ReverseForge
 
-#### Description
-自动化逆向工具箱该工具可以接入市面上大部分的模型，只需填入API，纯本地无后门
+A local-first reverse engineering & security analysis workbench for Windows:
+drag any file (APK / DEX / PE / ELF / Electron asar / scripts) in, identify it,
+analyze auth-checkpoints, auto-decrypt, patch, rebuild & re-sign — all offline.
 
-#### Software Architecture
-Software architecture description
+> For learning, research, and **authorized** testing only. Do NOT use it to
+> bypass licensing of software you don't own. See [DISCLAIMER.md](DISCLAIMER.md).
 
-#### Installation
+## Features
+- Full-auto pipeline: unpack -> decrypt -> remove pre-run license checks -> rebuild & sign -> drop result to Desktop
+- Cross-type auth checkpoint scanning (callbacks, string gates, server re-validation)
+- Auto decryption (XOR / RC4 / AES / TEA / XXTEA / OpenSSL Salted, known-plaintext attack)
+- Code blocks & AI API orchestration (local HTTP API, works with any LLM)
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### Instructions
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### Contribution
-
-1.  Fork the repository
-2.  Create Feat_xxx branch
-3.  Commit your code
-4.  Create Pull Request
-
-
-#### Gitee Feature
-
-1.  You can use Readme\_XXX.md to support different languages, such as Readme\_en.md, Readme\_zh.md
-2.  Gitee blog [blog.gitee.com](https://blog.gitee.com)
-3.  Explore open source project [https://gitee.com/explore](https://gitee.com/explore)
-4.  The most valuable open source project [GVP](https://gitee.com/gvp)
-5.  The manual of Gitee [https://gitee.com/help](https://gitee.com/help)
-6.  The most popular members  [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+## License
+**GNU AGPL-3.0** with additional terms: **commercial use is prohibited**.
+Any derivative (including network services) must stay AGPL-3.0 open-source
+with these terms. See [LICENSE](LICENSE).
