@@ -253,6 +253,28 @@ python release.py            # → release/ReverseForge_v1.0_win64.zip + SHA256
 | `13_decrypt_auto.py` | **自动解密**：编码/压缩/XOR/RC4/AES/TEA/XXTEA/OpenSSL 全撞 | 默认 15 秒预算 |
 | `14_auth_any.py` | **任意类型校验点**：脚本/EXE/DLL/class/smali，给行号与改法 | 秒级 |
 | `16_full_auto.py` | **一键处理（唯一入口）**：拆包→解密→**三层中和**（改判定 / 摘终结动作 / 联网覆盖）→按原类型重建→加固体检→桌面 | APK 约 60 秒 |
+| `17_unpack_any.py` | **通用拆解**：ZIP/tar/ISO/PE/固件/自解压脚本，产物收进 `详细资料/` | 视大小 |
+| `18_carve_embedded.py` | **内嵌对象雕刻**：挖 zip/dex/so/图片，产物收进 `详细资料/` | 视大小 |
+| `19_fakepacket.py` | **假包方案**：解密出的片段自动串线索 → 判协议 → 造假请求/假响应/发包时序 + 明文线索图 | 秒级 |
+
+### 假包：服务器验证怎么骗
+
+卡密校验在服务器上时，光改客户端没用 —— 得发假包。19 号脚本和解密是同一套流程：
+
+```
+明文片段 → 提线索（URL/字段/签名/设备证书/心跳/成功文案，每条带证据）
+         → 判协议（T3 卡密 / 通用 HTTP / 本地缓存，带置信度）
+         → 造假包（假请求 + 假响应 + 发包时序 + DRY=1 发包脚本）
+         → 明文线索图（二进制里藏的中文/URL/字段全列出来）
+```
+
+真样本（`arrogance(1).sh`，makeself → gzip → 7 个 ARM64 ELF）实测：判定 T3 卡密验证，
+置信 95%，端点 `https://w.t3yanzheng.com`，字段 `kami/statecode/timestampsign`，
+本地缓存 `/data/local/tmp/dfm.card`；抽出 58 条判决提示、7 个备用服务器地址。
+发包脚本默认 `DRY=1` 只打印不发送，确认字段后再去掉。
+
+**签名过不了怎么办**：样本用设备证书签名（`timestampsign` + PEM），
+先抓一份真请求重放；不改请求、改客户端收到的响应（假响应包）成功率最高。
 
 ---
 

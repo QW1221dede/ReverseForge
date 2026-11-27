@@ -58,6 +58,9 @@ from .analysis import validator as validatormod
 from .decrypt import auto as decauto
 from .decrypt import ciphers as decC
 from .decrypt import keys as deckeys
+from .fakepacket import extract as fp_extract, infer as fp_infer, build as fp_build
+from .fakepacket import render_script as fp_script, report_md as fp_report
+from .fakepacket import plaintext_map as fp_plaintext
 from .patch import checkpoints as cpmod
 from .patch import engine as patchmod
 from .patch import netcheck as netmod
@@ -1256,6 +1259,66 @@ class Api:
                 self.log(f"  ! 落盘失败：{e}")
         for f in files:
             self.log(f"  → {f}")
+        return files
+
+    # =================== 假包（线索 → 协议 → 发包方案） ===================
+    def fakepacket_build(self, target: str | Path) -> dict:
+        """
+        和 decrypt_auto 同一套流程，只是产物从「明文」变成「假包」：
+
+            解出来的明文片段 → 提线索 → 判协议 → 造请求/响应/时序包 → 报告
+
+        返回 {chain, protocols, packets, report, script}。
+        """
+        p = self._need_path(target)
+        self.ctx.step("提取协议线索", 20)
+        chain = fp_extract(p)
+        self.ctx.step("判定协议与发包时机", 50)
+        protos = fp_infer(chain)
+        self.ctx.step("构造假包", 75)
+        packs = fp_build(chain, protos)
+        script = fp_script(protos[0], packs) if protos else "# 没判定出协议，没有发包脚本"
+        rep = fp_report(chain, protos, packs, str(p))
+        # 解出来的明文片段 → 可读线索图（用户口径「后面一大串加密没明文展现」）
+        pmap = None
+        try:
+            pmap = fp_plaintext(p)
+            rep += "\n\n## 五、明文线索图（二进制里藏的可读片段）\n\n" + pmap.markdown()
+        except Exception as e:                              # noqa: BLE001
+            rep += f"\n\n## 五、明文线索图\n\n抽取失败：{e}\n"
+        self.log(chain.summary())
+        if protos:
+            self.log(f"判定：{protos[0].name}（置信 {protos[0].confidence}%）"
+                     f" → {protos[0].endpoint}")
+            self.log(f"  什么时候发：{protos[0].timing}")
+        else:
+            self.log("没判定出协议 —— 先跑解密把明文挖出来")
+        return {"chain": chain, "protocols": protos, "packets": packs,
+                "report": rep, "script": script, "plaintext": pmap}
+
+    def fakepacket_save(self, result: dict,
+                        out_dir: str | Path | None = None) -> list[Path]:
+        """把假包、发包脚本和报告落盘。"""
+        od = Path(out_dir) if out_dir else self.out_dir / "fakepacket"
+        od.mkdir(parents=True, exist_ok=True)
+        files: list[Path] = []
+        md = od / "假包方案报告.md"
+        md.write_text(result.get("report", ""), encoding="utf-8")
+        files.append(md)
+        sc = od / "发包脚本.py"
+        sc.write_text(result.get("script", ""), encoding="utf-8")
+        files.append(sc)
+        pmap = result.get("plaintext")
+        if pmap is not None:
+            try:
+                files.append(pmap.save(od))
+            except Exception as e:                          # noqa: BLE001
+                self.log(f"  明文完整清单落盘失败：{e}")
+        for pk in result.get("packets", []):
+            f = od / pk.name
+            f.write_text(pk.content, encoding="utf-8")
+            files.append(f)
+        self.log(f"假包已落盘：{od}")
         return files
 
     def keys_any(self, target: str | Path, limit: int = 120) -> list:

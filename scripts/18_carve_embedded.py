@@ -31,12 +31,19 @@ rf.step("内嵌对象雕刻", 10)
 put = rf.log
 put(f"共 {len(files)} 个待雕刻目标")
 
+# 产物收成「小白版」：根目录只留 使用说明.txt + 详细资料/，
+# 抠出来的对象和报告全进 详细资料/（跟 16 号全自动化一致）。
+out = rf.sub("内嵌雕刻")
+detail = out / "详细资料"
+detail.mkdir(parents=True, exist_ok=True)
+
 ok = 0
 report: list[str] = ["# 内嵌对象雕刻报告", ""]
+found_dirs: list[str] = []
 for i, f in enumerate(files, 1):
     rf.step(f"雕刻 {f.name}", int(10 + 80 * i / max(1, len(files))))
     try:
-        r = rf.carve(f)
+        r = rf.carve(f, out=detail / f"{f.stem}_carved")
         if r["found"]:
             ok += 1
             put(f"✓ [{i}/{len(files)}] {f.name}："
@@ -46,19 +53,33 @@ for i, f in enumerate(files, 1):
                        + (f" —— {o['note']}" if o.get("note") else "")
                        for o in r["objects"]]
             report += [f"- 产物：{r['output']}", ""]
+            found_dirs.append(f"{f.stem}_carved/")
         else:
             put(f"- [{i}/{len(files)}] {f.name}：没有可雕刻对象")
-    except Exception as e:                                       # noqa: BLE001
+    except Exception as e:                                   # noqa: BLE001
         put(f"✗ [{i}/{len(files)}] {f.name}：{e}")
 
 rf.step("汇总", 95)
-rep = rf.sub("report") / "内嵌雕刻报告.md"
-rep.parent.mkdir(parents=True, exist_ok=True)
+rep = detail / "内嵌雕刻报告.md"
 rep.write_text("\n".join(report) if len(report) > 2 else "# 没有发现内嵌对象",
                encoding="utf-8")
+
+note = out / "使用说明.txt"
+note.write_text(
+    "这个文件夹是什么\n\n"
+    "　　已经从你给的文件里把藏着的 zip / dex / so / 图片等对象抠出来了。\n\n"
+    "要用的文件\n\n"
+    + ("".join(f"　　详细资料/{d}　抠出来的对象按 类型_序号_偏移 命名\n"
+               for d in found_dirs[:20]) or "　　本次没有发现可雕刻的对象。\n")
+    + "　　详细资料/内嵌雕刻报告.md　每个对象是什么、在文件什么位置。\n\n"
+    "别的都不用管\n\n"
+    "　　根目录只有这份说明和 详细资料/，平时打开 详细资料/ 找文件就行。\n\n"
+    "　　（本工具只做本地分析，原始文件从未被修改。）\n",
+    encoding="utf-8")
 put(f"雕刻完成：{ok} / {len(files)} 个文件有收获；报告 → {rep}")
+put(f"  产物：{out}")
 
 if to_desktop:
     from rf.tools.desktop import drop_to_desktop
-    p = drop_to_desktop(rep)
-    put(f"报告已复制到桌面：{p.name}")
+    p = drop_to_desktop(note)
+    put(f"说明已复制到桌面：{p.name}")
