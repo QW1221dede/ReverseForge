@@ -19,3 +19,15 @@ Any derivative (including network services) must stay AGPL-3.0 open-source
 with these terms. See [LICENSE](LICENSE).
 
 **Donation (optional)**: if this tool helps you, you can email the author at m358685@163.com to arrange support. Donations are voluntary and unlock nothing; every feature stays free and open-source.
+
+
+## v12: Embedded-object carving
+
+Formats whose "unpacking" differs from generic extraction are now handled
+natively: vdex/oat/odex embedded DEX extraction, packed-APK DEX recovery from
+lib/*.so, encrypted-zip weak-password auto fallback, and a universal carving
+layer (zip/dex/cdex/ELF/gzip/xz/bzip2/7z/rar/png/jpg/pdf/sqlite/zstd) that
+scans byte streams without relying on a header at offset 0. Entry points:
+`rf.carve()` or script 18.
+
+> Feedback in Chinese only: m358685@163.com (English not accepted).

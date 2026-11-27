@@ -51,6 +51,7 @@ from .analysis import annotate as annotmod
 from .analysis import authscan as authmod
 from .analysis import filetype as ftmod
 from .analysis import garble as garblemod
+from .analysis import carve as carvemod
 from .analysis import segments as segmod
 from .analysis import validator as validatormod
 from .decrypt import auto as decauto
@@ -777,6 +778,23 @@ class Api:
             ur = self.apk_unpack(p, dst)
             res["files"] = ur.files if hasattr(ur, "files") else -1
             res["notes"].append("APK 走专用链路：资源解包 + 源码反编译")
+            # 脱壳辅助：加固壳常把原始 dex 藏在 lib/*.so 或残留段里，
+            # 对解包目录里的 so / 大文件做内嵌 dex 雕刻，能捞回就捞
+            try:
+                fat = [f for f in dst.rglob("*")
+                       if f.is_file() and f.suffix.lower() in
+                       (".so", ".dat", ".bin") and 1 << 20 < f.stat().st_size < 1 << 30]
+                for f in fat[:8]:
+                    cr = carvemod.carve_file(f, f.parent / (f.name + "_carved"),
+                                             max_objects=20)
+                    dexes = [o for o in cr.objects if o.kind in ("dex", "cdex")]
+                    if dexes:
+                        res["notes"].append(
+                            f"⚠ 疑似加固脱壳辅助：{f.name} 里雕出 "
+                            f"{len(dexes)} 个内嵌 dex → {f.name}_carved/，"
+                            "可丢进 APK 页反编译")
+            except Exception:                                       # noqa: BLE001
+                pass
             return res
 
         # ---- 2) 多 APK 打包体（APKS/XAPK/AAB）：先解出内层 APK ----
@@ -835,7 +853,18 @@ class Api:
             except Exception as e:                                  # noqa: BLE001
                 notes.append(f"原生解压失败（可能加密包）：{e}")
                 if real == "zip":
-                    notes.append("可用「识别」页的 zip_password 尝试已知明文攻击")
+                    self.ctx.step("尝试弱口令解密", 60)
+                    try:
+                        r = self.zip_password(p, out=dst / "_decrypted")
+                        if getattr(r, "ok", False) or (
+                                r.password and (dst / "_decrypted").exists()):
+                            res["method"] = "弱口令解密（ZIP 家族）"
+                            self._count_files(res, dst / "_decrypted")
+                            notes.append(f"口令命中：{r.password}")
+                            return res
+                        notes.append("弱口令未命中；可在「识别」页用已知明文攻击")
+                    except Exception as e2:                          # noqa: BLE001
+                        notes.append(f"弱口令尝试失败：{e2}")
 
         # ---- 2.6) tar / tar.gz / tar.bz2 / tar.xz / 裸 gzip、bzip2、xz ----
         # tarfile 原生通吃三种压缩，零外部依赖
@@ -933,9 +962,27 @@ class Api:
                 self._count_files(res, dst)
                 return res
 
-        # ---- 5) 兜底：分段 + 画像 ----
-        res["method"] = "分段 + 画像（该类型没有容器结构可拆）"
-        notes.append("文件本身不是容器，已产出：分段图 / 熵分布 / 字符串画像；"
+        # ---- 4.5) ART 产物（vdex / oat / dex / cdex / odex）→ 雕刻内嵌 dex ----
+        # vdex/oat 里真正能反编译的是内嵌 dex，必须格式专属提取，通用解压拆不开
+        if real in ("vdex", "oat", "dex", "cdex", "odex"):
+            self.ctx.step("雕刻内嵌 dex", 40)
+            try:
+                cr = carvemod.carve_file(p, dst / "carved")
+                if cr.objects:
+                    res["method"] = "内嵌 dex 雕刻（格式专属提取）"
+                    ndex = sum(1 for o in cr.objects if o.kind in ("dex", "cdex"))
+                    self._count_files(res, dst)
+                    notes.append(f"{cr.brief()}；dex 已抠出 → carved/")
+                    if ndex:
+                        notes.append("抠出的 .dex 直接丢进 APK 页可用 jadx 反编译")
+                    return res
+                notes.append("未雕刻出对象，改走分段画像")
+            except Exception as e:                                  # noqa: BLE001
+                notes.append(f"雕刻失败：{e}")
+
+        # ---- 5) 兜底：分段 + 画像 + 内嵌对象雕刻 ----
+        res["method"] = "分段 + 画像 + 内嵌雕刻（该类型没有容器结构可拆）"
+        notes.append("已产出：分段图 / 熵分布 / 字符串画像；"
                      "若是密文，接「一键解密」")
         rep = dst / "拆解报告.md"
         lines = ["# 拆解报告", "", f"- 文件：{p}", f"- 识别：{kind.brief()}",
@@ -948,9 +995,41 @@ class Api:
                 lines.append(f"- 明暗分界：{sm.split.brief()}")
         except Exception as e:                                      # noqa: BLE001
             lines.append(f"分段失败：{e}")
+        # 内嵌对象雕刻：固件 / 加壳 PE / 混合文件里常埋着 zip、dex、so
+        try:
+            cr = carvemod.carve_file(p, dst / "carved")
+            if cr.objects:
+                lines.append("## 内嵌对象")
+                for o in cr.objects[:50]:
+                    lines.append(f"- {o.label}" + (f" —— {o.note}" if o.note else ""))
+                notes.append(f"{cr.brief()} → carved/（内嵌对象已抠出）")
+        except Exception as e:                                      # noqa: BLE001
+            lines.append(f"雕刻失败：{e}")
         rep.write_text("\n".join(lines), encoding="utf-8")
         res["files"] = 1
         notes.append(f"报告 → {rep}")
+        return res
+
+    def carve(self, path: str | Path, out: str | Path | None = None) -> dict:
+        """
+        内嵌对象雕刻：不依赖文件头在偏移 0，直接扫字节流里的
+        zip / dex / cdex / ELF / gzip / xz / bzip2 / 7z / png / jpg / pdf /
+        sqlite / zstd 特征并整块抠出。vdex/oat 挖 dex、固件扒段、
+        加壳 PE 找资源都靠这一层。
+        返回 dict：type/found/output/objects。
+        """
+        p = self._need_file(path)
+        self.ctx.step("扫描内嵌对象", 40)
+        cr = carvemod.carve_file(p, out)
+        objs = [{"kind": o.kind, "offset": o.offset, "size": o.size,
+                 "note": o.note} for o in cr.objects]
+        res = {"type": p.name, "found": bool(cr.objects), "objects": objs}
+        if cr.objects:
+            dst = Path(out) if out else p.with_name(p.stem + "_carved")
+            res["output"] = str(dst)
+            self.log(f"  {cr.brief()} → {dst}")
+        else:
+            self.log("  没有发现可雕刻的内嵌对象")
         return res
 
     def _tool(self, tid: str):

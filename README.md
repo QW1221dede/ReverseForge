@@ -872,19 +872,26 @@ reverseforge/
 `logs/`（逐次命令日志）、`scripts/`（自己的脚本）、`tool_versions.json`（版本缓存）。
 
 
-### 通用拆解覆盖清单（v11）
+### 通用拆解覆盖清单（v12）
 
 「一键拆包」对**任何文件**自动选最合适的拆法，不再只认 APK：
 
 | 类型 | 拆法 |
 |---|---|
-| APK / AAB / APKS / XAPK | apktool + jadx 全流程 |
-| ZIP 家族：jar / docx / xlsx / pptx / ipa / appx / msix / crx / xpi / epub / nupkg / vsix / aar / war / ear / odt / ods / odp / whl / sketch | Python 原生解压（自动修复中文文件名乱码） |
+| APK / AAB / APKS / XAPK | apktool + jadx 全流程；**加固壳自动脱壳辅助**（从 lib/*.so 里雕出残留 dex） |
+| ZIP 家族：jar / docx / xlsx / pptx / ipa / appx / msix / crx / xpi / epub / nupkg / vsix / aar / war / ear / odt / ods / odp / whl / sketch | Python 原生解压（自动修复中文文件名乱码）；**加密 zip 自动接弱口令解密** |
 | tar / tar.gz / tar.bz2 / tar.xz / 裸 gzip·bz2·xz | Python tarfile（零外部依赖） |
 | RAR / 7z / ISO / DMG / MSI / CAB / WIM / VHD / VHDX / RPM / SquashFS / AR | 7-Zip 完整版 |
 | 旧版 Office（doc/xls/ppt）/ Outlook 邮件 msg / Access mdb / CHM 帮助 | 7-Zip 抽内嵌流与附件 |
 | EXE / DLL（PE） | 7-Zip 抽资源节 + 字符串清单 |
-| 其它（ELF / 脚本 / 密文 / SQLite / PCAP / LNK…） | 分段 + 熵 + 画像报告 |
+| **vdex / oat / odex（ART 产物）** | **内嵌 dex 雕刻**：格式专属提取出可反编译的 .dex |
+| 其它（ELF / 脚本 / 密文 / SQLite / PCAP / LNK / 固件…） | 分段 + 熵 + 画像 + **内嵌对象雕刻** |
+
+**v12 新增：内嵌对象雕刻（carve）**。很多文件的"解密方式"和通用解压不是一回事——
+vdex/oat 里真正能反编译的是内嵌 dex，加固 APK 的原始 dex 藏在 so 里，固件/镜像/加壳
+PE 里埋着 zip 段。雕刻层不依赖文件头在偏移 0，直接扫字节流特征，整块抠出：
+zip（自动重建为可打开的压缩包）/ dex / cdex / ELF / gzip / xz / bzip2 / 7z / rar /
+png / jpg / pdf / sqlite / zstd。单独入口：`rf.carve()` 或脚本 18「内嵌对象雕刻」。
 
 识别端同步新增：zstd / LZ4 / LZIP / LZOP / compress.Z / CAB / WIM / TAR / VHD / VHDX / DMG / ISO9660 / CHM / OLE 细分（doc/xls/ppt/msg/mdb/msi/one）/ SWF / PCAP / PCAPNG / BT 种子 / LNK 快捷方式 / 字体 / pyc / EPUB 等三十余种。
 
