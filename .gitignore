@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- 运行产物 ---
+_test_out/
+_test*/
+workspace/
+logs/
+*.log
+
+# --- 打包 ---
+dist/
+release/*.zip
+release/*.sha256
+build/
+
+# --- IDE / 系统 ---
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# --- 本地敏感/临时 ---
+*.token
+secrets.*
