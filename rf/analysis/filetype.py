@@ -118,8 +118,16 @@ _MAGIC: list[tuple[bytes, str, str, str]] = [
 
     (b"dex\n", "DEX 字节码", CAT_ANDROID, "dex"),
     (b"cdex", "Compact DEX", CAT_ANDROID, "cdex"),
+    (b"vdex", "VDEX（ART 验证 DEX）", CAT_ANDROID, "vdex"),
+    (b"oat\n", "OAT（ART 编译产物）", CAT_ANDROID, "oat"),
+    (b"art\n", "ART（启动镜像数据）", CAT_ANDROID, "art"),
+    (b"\xd0\x0d\xfe\xed", "DTB 设备树", CAT_ANDROID, "dtb"),
+    (b"AVB0", "AVB 元数据（vbmeta）", CAT_ANDROID, "vbmeta"),
+    (b"CrAU", "OTA payload.bin（更新引擎）", CAT_ANDROID, "payload"),
     (b"ANDROID!", "Android boot 镜像", CAT_ANDROID, "bootimg"),
     (b"\x27\x05\x19\x56", "Android sparse image", CAT_ANDROID, "sparse"),
+    (b"IM4P", "IM4P（Apple 固件封装）", CAT_ANDROID, "im4p"),
+    (b"dyld_v1 ", "dyld 共享缓存（iOS/macOS）", CAT_ANDROID, "dyldcache"),
 
     (b"\x1bLua", "Lua 字节码", CAT_SCRIPT, "luac"),
     (b"<?php", "PHP 源码", CAT_SCRIPT, "php"),
@@ -175,6 +183,17 @@ _ROUTE: dict[str, list[str]] = {
     "class": ["authscan", "strings"],
     "jar": ["authscan", "unpack", "strings"],
     "dex": ["dex", "strings", "patch_scan"],
+    "vdex": ["strings", "identify"],
+    "oat": ["strings", "identify"],
+    "art": ["strings", "identify"],
+    "dtb": ["strings", "identify"],
+    "vbmeta": ["identify"],
+    "payload": ["unpack", "identify"],
+    "im4p": ["strings", "identify"],
+    "dyldcache": ["strings"],
+    "ext4": ["unpack", "identify"],
+    "efi": ["strings", "identify"],
+    "ota": ["unpack"],
     "apk": ["apk_info", "apk_unpack", "patch_scan"],
     "zip": ["unpack", "zip_password", "identify"],
     "rar": ["unpack", "identify"],
@@ -236,6 +255,67 @@ _ROUTE: dict[str, list[str]] = {
 
 _SCRIPT_LANGS = {"py", "pyc", "js", "lua", "luac", "sh", "bat", "ps1", "vbs",
                  "au3", "ahk", "tcl", "pl", "rb", "php", "nsi", "nut"}
+
+
+def _post_fallback(k: "FileKind", p: Path, data: bytes) -> None:
+    """real 仍是 unknown 时的结构性兜底：需要偏移读取或只看扩展名的类型。
+    魔数命中段与无魔数段的出口都会调用。"""
+    if k.real != "unknown":
+        return
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return
+    # tar：偏移 257 处是 ustar
+    if len(data) >= 262 and data[257:262] == b"ustar":
+        k.real, k.category = "tar", CAT_ARCHIVE
+        k.label = "TAR 归档"
+        k.confidence = 90
+        return
+    # ISO9660：偏移 0x8001 是 CD001
+    if size > 0x8801:
+        try:
+            with p.open("rb") as _f:
+                _f.seek(0x8001)
+                if _f.read(5) == b"CD001":
+                    k.real, k.category = "iso", CAT_ARCHIVE
+                    k.label = "ISO 光盘镜像"
+                    k.confidence = 95
+                    return
+        except OSError:
+            pass
+    # ext2/3/4 超级块：偏移 1080 处 0xEF53（Android super/系统分区常见）
+    if size > 1082:
+        try:
+            with p.open("rb") as _f:
+                _f.seek(1080)
+                if _f.read(2) == b"\x53\xef":
+                    k.real, k.category = "ext4", CAT_ARCHIVE
+                    k.label = "EXT4 分区镜像（Linux/Android）"
+                    k.confidence = 92
+                    k.notes.append("分区镜像：可用 7-Zip 试解，"
+                                   "或 resize2fs 缩容后挂载")
+                    return
+        except OSError:
+            pass
+    # EFI 固件模块（无 MZ 头时按扩展名兜底；有 MZ 早已认成 PE）
+    if k.ext in (".efi", ".efires", ".firm"):
+        k.real, k.category = "efi", CAT_BINARY
+        k.label = "EFI 固件模块（按扩展名，无 MZ 头）"
+        k.confidence = 60
+        k.notes.append("用 strings 先看；有 MZ 头会自动走 PE 分析链")
+        return
+    # pyc：任意 4 字节魔数 + \r\n 固定在 2:4
+    if k.ext == ".pyc" and len(data) >= 16 and data[2:4] == b"\r\n":
+        k.real, k.category = "pyc", CAT_SCRIPT
+        k.label = "Python 字节码（.pyc）"
+        k.confidence = 85
+        return
+    # URL 快捷方式
+    if k.ext == ".url" and k.printable > 0.5:
+        k.real, k.category = "url", CAT_DATA
+        k.label = "URL 快捷方式"
+        k.confidence = 80
 
 
 # ---------------------------------------------------------------------------
@@ -587,34 +667,8 @@ def sniff(path: str | Path, sample: int = 8192) -> FileKind:
         else:
             k.confidence = 95
 
-        # ---- 无魔数命中的常见容器兜底 ----
-        if k.real == "unknown" and len(data) >= 262:
-            # tar：偏移 257 处是 ustar
-            if data[257:262] == b"ustar":
-                k.real, k.category = "tar", CAT_ARCHIVE
-                k.label = "TAR 归档（老格式无 ustar 版本号）"
-                k.confidence = 90
-            # ISO9660：偏移 0x8001 是 CD001
-            elif p.stat().st_size > 0x8801:
-                try:
-                    with p.open("rb") as _f:
-                        _f.seek(0x8001)
-                        if _f.read(5) == b"CD001":
-                            k.real, k.category = "iso", CAT_ARCHIVE
-                            k.label = "ISO 光盘镜像"
-                            k.confidence = 95
-                except OSError:
-                    pass
-        # pyc：任意 4 字节魔数 + \r\n 固定在 2:4
-        if k.real == "unknown" and k.ext == ".pyc" and len(data) >= 16 \
-                and data[2:4] == b"\r\n":
-            k.real, k.category = "pyc", CAT_SCRIPT
-            k.label = "Python 字节码（.pyc）"
-            k.confidence = 85
-        if k.real == "unknown" and k.ext == ".url" and k.printable > 0.5:
-            k.real, k.category = "url", CAT_DATA
-            k.label = "URL 快捷方式"
-            k.confidence = 80
+        # 结构性兜底（tar/ISO/ext4/EFI/pyc/url：需要偏移读取或只看扩展名）
+        _post_fallback(k, p, data)
 
         # 补充：PE/ELF 的扩展名一致性（伪装提醒）
         if k.ext and k.real in ("pe", "elf") and _ext_mismatch(k.ext, k.real):
@@ -653,6 +707,10 @@ def sniff(path: str | Path, sample: int = 8192) -> FileKind:
     # ---- 3) 兜底：先看是不是"明文头 + 密文"（最常见的自定义容器形态） ----
     #   判据：开头有一段连续可打印 ASCII，后面整体熵很高。
     #   这种情况直接说"混合文件"，比笼统报"疑似加密"有用得多。
+    _post_fallback(k, p, data)          # pyc / EFI / ext4 / iso 等兜底
+    if k.real != "unknown":
+        k.route = list(_ROUTE.get(k.real, []))
+        return k
     head_run = 0
     limit = min(len(data), 8192)
     while head_run < limit and (32 <= data[head_run] < 127 or data[head_run] in (9, 10, 13)):
@@ -738,6 +796,10 @@ def _zip_flavor(p: Path, head: bytes) -> tuple[str, str, str] | None:
             ".sketch": ("sketch", "Sketch 设计稿（实为 ZIP）", CAT_MEDIA),
             ".apks": ("apk", "APK 分包集合（实为 ZIP）", CAT_ANDROID),
             ".xapk": ("apk", "XAPK 分发包（实为 ZIP）", CAT_ANDROID),
+            ".appxbundle": ("appx", "Windows 应用捆绑包（实为 ZIP）", CAT_ARCHIVE),
+            ".msixbundle": ("msix", "Windows 应用捆绑包（实为 ZIP）", CAT_ARCHIVE),
+            ".appxupload": ("appx", "Windows 应用上传包（实为 ZIP）", CAT_ARCHIVE),
+            ".ota": ("ota", "OTA 增量更新包（实为 ZIP）", CAT_ANDROID),
         }
         hit = _zipish.get(p.suffix.lower())
         if hit:

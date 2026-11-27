@@ -736,7 +736,8 @@ class Api:
     # Python zipfile 原生可解的 ZIP 家族（含 JAR / OOXML / wheel）
     _ZIP_REALS = ("zip", "jar", "docx", "xlsx", "pptx", "whl", "pyz", "egg",
                   "ipa", "appx", "msix", "crx", "xpi", "epub", "nupkg",
-                  "vsix", "aar", "war", "ear", "odt", "ods", "odp", "sketch")
+                  "vsix", "aar", "war", "ear", "odt", "ods", "odp", "sketch",
+                  "ota")
     # 7-Zip（完整版）才认识的容器：压缩 / 归档 / 磁盘镜像 / 安装器 / OLE / CHM
     _7Z_REALS = ("rar", "7z", "zstd", "lzma", "lz4", "lzip", "lzop", "z",
                  "iso", "dmg", "msi", "wim", "cab", "vhd", "vhdx",
