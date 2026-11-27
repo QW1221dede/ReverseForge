@@ -145,3 +145,13 @@ Software Protection Regulations Art. 24 (see Section 5 above, authoritative Chin
 
 **License**: GNU AGPL-3.0 **plus additional terms prohibiting any commercial use** (see LICENSE).
 By downloading or using this tool you declare your use is lawful and authorized.
+
+
+## 联系方式 / Contact
+
+- **邮箱 / Email**：m358685@163.com
+- **Gitee Issues**：https://gitee.com/tw-dm/reverse-forge/issues
+- **GitHub Issues**：https://github.com/QW1221dede/ReverseForge/issues
+
+**请用中文交流，不接受英文。** 用英文提交的反馈、Issue 与邮件可能不会得到回复。
+(Chinese only — English submissions may not be answered.)

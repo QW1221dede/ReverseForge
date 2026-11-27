@@ -872,6 +872,17 @@ reverseforge/
 `logs/`（逐次命令日志）、`scripts/`（自己的脚本）、`tool_versions.json`（版本缓存）。
 
 
+## 反馈与意见渠道
+
+- **邮箱**：m358685@163.com
+- **Gitee**：https://gitee.com/tw-dm/reverse-forge/issues
+- **GitHub**：https://github.com/QW1221dede/ReverseForge/issues
+
+> ⚠️ **请用中文交流。本项目的反馈、Issue、邮件一律只接受中文，不接受英文。**
+> 用英文提交的 Issue 与邮件可能不会得到回复。
+>
+> (Feedback in Chinese only — English issues/emails may not be answered.)
+
 ## 开源协议
 
 本项目采用 **GNU AGPL-3.0** + 附加条款发布：
