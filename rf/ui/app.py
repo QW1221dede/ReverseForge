@@ -447,7 +447,6 @@ class App(_ROOT_BASE):
         self._build_patch_tab(nb)
         self._build_repl_tab(nb)
         self._build_chat_tab(nb)
-        self._build_bypass_tab(nb)
         self._build_fullauto_tab(nb)
 
     # ---------------- 状态栏 ----------------
@@ -2522,149 +2521,6 @@ class App(_ROOT_BASE):
             self._chat_append(f"[API 启动失败] {e}\n", "err")
 
 
-    # ===================================================================
-    # 卡密绕过：独立一键入口
-    # ===================================================================
-    def _build_bypass_tab(self, nb) -> None:
-        f = tk.Frame(nb, bg=T.PANEL)
-        nb.add(f, text="  卡密绕过  ")
-
-        top = tk.Frame(f, bg=T.PANEL)
-        top.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(top, text="前置校验 / 运行前密码 · 卡密", bg=T.PANEL,
-                 fg=T.TEXT, font=T.UI_FONT_B).pack(side="left")
-        self.lbl_bypass = tk.Label(top, text="目标：投放区为空", bg=T.PANEL,
-                                   fg=T.MUTED, font=T.UI_FONT_S)
-        self.lbl_bypass.pack(side="left", padx=10)
-
-        tk.Label(f, text="把外挂 / 脚本拖到左上投放区，然后点按钮。"
-                         "改完会自动验证「结构 / 签名 / 回读 / 运行」四关，"
-                         "原文件不动，备份留在本页产物目录。",
-                 bg=T.PANEL, fg=T.MUTED, font=T.UI_FONT_S,
-                 anchor="w", wraplength=1000).pack(fill="x", padx=14, pady=(0, 8))
-
-        bar = tk.Frame(f, bg=T.PANEL)
-        bar.pack(fill="x", padx=12, pady=(0, 8))
-        self.btn_bypass = ttk.Button(bar, text="一键识别 → 替换 → 验证",
-                                     style="Accent.TButton",
-                                     command=self._bypass_start)
-        self.btn_bypass.pack(side="left")
-        tk.Label(bar, text="模式", bg=T.PANEL, fg=T.MUTED,
-                 font=T.UI_FONT_S).pack(side="left", padx=(12, 4))
-        self.bypass_mode = tk.StringVar(value="auto")
-        ttk.Combobox(bar, textvariable=self.bypass_mode,
-                     values=["auto", "scan", "patch", "full"],
-                     state="readonly", width=10).pack(side="left")
-        self.bypass_verify = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="装到设备验证（需 adb）",
-                       variable=self.bypass_verify, bg=T.PANEL, fg=T.TEXT,
-                       activebackground=T.PANEL, selectcolor=T.PANEL2,
-                       borderwidth=0, font=T.UI_FONT_S).pack(side="left", padx=10)
-        self.bypass_desktop = tk.BooleanVar(value=True)   # 默认开：小白不用学打包
-        tk.Checkbutton(bar, text="成品自动放桌面",
-                       variable=self.bypass_desktop, bg=T.PANEL, fg=T.TERM_OK,
-                       activebackground=T.PANEL, selectcolor=T.PANEL2,
-                       borderwidth=0, font=T.UI_FONT_S).pack(side="left")
-        ttk.Button(bar, text="打开产物", style="Ghost.TButton",
-                   command=self._bypass_open).pack(side="right")
-
-        wrap = tk.Frame(f, bg=T.PANEL)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-        self.bypass_log = T.make_text(wrap, mono=True)
-        self.bypass_log.configure(state="normal")
-        self.bypass_log.pack(side="left", fill="both", expand=True)
-        bsb = ttk.Scrollbar(wrap, orient="vertical", command=self.bypass_log.yview)
-        bsb.pack(side="right", fill="y")
-        self.bypass_log.configure(yscrollcommand=bsb.set)
-        self.bypass_log.tag_configure("ok", foreground=T.TERM_OK)
-        self.bypass_log.tag_configure("err", foreground=T.TERM_ERR)
-        self.bypass_log.tag_configure("meta", foreground=T.MUTED)
-        self.bypass_log.delete("1.0", "end")
-        self.bypass_log.insert("1.0", "目标取自左上投放区。\n"
-                                      "auto=自动判断；scan=只看不换；"
-                                      "patch=只打补丁不重建；full=重建 APK。\n", "meta")
-
-        import queue as _q
-        self._bypass_q: "_q.Queue" = _q.Queue()
-        self._bypass_run = None
-        self.after(150, self._bypass_pump)
-        self.after(400, self._bypass_sync_target)
-
-    def _bypass_sync_target(self) -> None:
-        files = getattr(self, "drop", None) and self.drop.files
-        if files:
-            self.lbl_bypass.configure(
-                text=f"目标：{files[0].name}"
-                     + (f" 等 {len(files)} 个" if len(files) > 1 else ""),
-                fg=T.OK)
-        else:
-            self.lbl_bypass.configure(text="目标：投放区为空", fg=T.MUTED)
-        self.after(600, self._bypass_sync_target)
-
-    def _bypass_append(self, text: str, tag: str = "") -> None:
-        self.bypass_log.configure(state="normal")
-        self.bypass_log.insert("end", text + "\n", tag or ())
-        self.bypass_log.see("end")
-        self.bypass_log.configure(state="disabled")
-
-    def _bypass_start(self) -> None:
-        from ..engine.script_runtime import ScriptRun
-
-        if self._bypass_run and self._bypass_run.alive:
-            self._bypass_append("上一轮还在跑…", "meta")
-            return
-        files = getattr(self, "drop", None) and self.drop.files
-        if not files:
-            messagebox.showinfo("提示", "先把外挂或脚本拖到左上角投放区。")
-            return
-        script = next((s.file for s in self.scripts
-                       if "15_auth_bypass" in str(s.file)), None)
-        if script is None:
-            messagebox.showerror("找不到脚本", "scripts/15_auth_bypass.py 不在脚本库里，点一下刷新。")
-            return
-
-        params = {
-            "target": str(files[0].path),
-            "mode": self.bypass_mode.get(),
-            "run_verify": bool(self.bypass_verify.get()),
-            "to_desktop": bool(self.bypass_desktop.get()),
-        }
-        self.btn_bypass.configure(state="disabled")
-        self._bypass_append("\n▶ 开始：" + str(files[0].path), "meta")
-        self._bypass_run = ScriptRun(
-            script, params,
-            workdir=config.WORKSPACE_ROOT / f"{time.strftime('%m%d_%H%M%S')}_bypass",
-            on_event=lambda ev: self._bypass_q.put(ev))
-        self._bypass_run.start()
-
-    def _bypass_pump(self) -> None:
-        try:
-            while True:
-                ev = self._bypass_q.get_nowait()
-                if ev.kind == "step":
-                    self._bypass_append(f"── [{ev.pct:>3}%] {ev.text}", "meta")
-                elif ev.kind == "error":
-                    self._bypass_append(str(ev.text), "err")
-                else:
-                    self._bypass_append(str(ev.text))
-        except Exception:                            # noqa: BLE001
-            pass
-        run = self._bypass_run
-        if run and not run.alive and getattr(self, "_bypass_was_running", False):
-            self._bypass_was_running = False
-            self.btn_bypass.configure(state="normal")
-            self._bypass_append("■ 结束。报告与成品在「打开产物」里。", "meta")
-        if run and run.alive:
-            self._bypass_was_running = True
-        self.after(150, self._bypass_pump)
-
-    def _bypass_open(self) -> None:
-        run = self._bypass_run
-        if run and run.ctx.workdir:
-            open_path(run.ctx.workdir)
-        else:
-            open_path(config.WORKSPACE_ROOT)
-
     # ------------------------------------------------------------------
     # 全自动化：一键拆包 / 解密 / 删前置验证 / 打包 / 丢桌面
     # ------------------------------------------------------------------
@@ -2688,10 +2544,11 @@ class App(_ROOT_BASE):
                                  fg=T.MUTED, font=T.UI_FONT_S)
         self.lbl_auto.pack(side="left", padx=10)
 
-        tk.Label(f, text="文件直接丢左上投放区，点一个按钮就完事。"
-                         "卡密/密码这类前置验证会连同「服务器复核」一起删 ——"
-                         " 服务器拒绝、判卡密失效都不影响 App 继续运行；"
-                         "内嵌加密的规则包会尝试解密落盘。原文件不动，全程可回滚。",
+        tk.Label(f, text="唯一的处理入口（原「卡密绕过」已并入这一页，不再单独一个页签）。"
+                         "文件丢左上投放区，点一个按钮就完事：卡密/密码这类前置验证会连同"
+                         "「服务器复核」一起删 —— 服务器拒绝、判卡密失效都不影响 App 继续运行，"
+                         "成品照常装、照常开；内嵌加密的规则包会尝试解密落盘。"
+                         "原文件不动，全程可备份回滚。",
                  bg=T.PANEL, fg=T.MUTED, font=T.UI_FONT_S,
                  anchor="w", wraplength=1000).pack(fill="x", padx=14, pady=(0, 8))
 
@@ -2708,6 +2565,11 @@ class App(_ROOT_BASE):
                        bg=T.PANEL, fg=T.TERM_OK, activebackground=T.PANEL,
                        selectcolor=T.PANEL2, borderwidth=0,
                        font=T.UI_FONT_S).pack(side="left", padx=12)
+        self.auto_verify = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="装到设备验证（需 adb）", variable=self.auto_verify,
+                       bg=T.PANEL, fg=T.TEXT, activebackground=T.PANEL,
+                       selectcolor=T.PANEL2, borderwidth=0,
+                       font=T.UI_FONT_S).pack(side="left")
         ttk.Button(bar, text="打开产物", style="Ghost.TButton",
                    command=self._fullauto_open).pack(side="right")
 
@@ -2775,6 +2637,7 @@ class App(_ROOT_BASE):
             "target": str(files[0].path),
             "stage": stage,
             "to_desktop": bool(self.auto_desktop.get()),
+            "run_verify": bool(self.auto_verify.get()),
         }
         for w in self._fullauto_btns:
             try:

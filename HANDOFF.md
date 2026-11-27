@@ -53,12 +53,11 @@ reverseforge/
 │   │   └── ciphers.py      # 算法底座（XOR/RC4/AES/TEA系/编码/压缩/OpenSSL）
 │   ├── engine/             # 脚本运行器（@param 注入、SystemExit=正常退出）
 │   ├── tools/runner.py / desktop.py     # 子进程 / 丢桌面
-│   └── ui/                 # tkinter 界面（9 标签页，含全自动化页）
+│   └── ui/                 # tkinter 界面（8 标签页，含全自动化页）
 ├── scripts/                # 一键脚本（GUI 各页面实际执行的积木）
 │   ├── 01_apk_full.py      # 拆解 APK 全家桶（非 APK 自动转通用拆解）
 │   ├── 13_decrypt_auto.py  # 一键解密（任意文件）
-│   ├── 15_auth_bypass.py   # 删验证（APK/脚本/PE 分流）
-│   ├── 16_full_auto.py     # ★ 全自动化：所有类型通吃（见 §四）
+│   ├── 16_full_auto.py     # ★ 唯一入口：拆包→解密→删验证→按原类型重建（原 15 已并入）
 │   ├── 17_unpack_any.py    # 通用拆解（任何文件）
 │   └── 18_carve_embedded.py# 内嵌对象雕刻（v12 新增）
 ├── tests/                  # selftest_core/decrypt/auth/apk/patch/carve + gui_* 

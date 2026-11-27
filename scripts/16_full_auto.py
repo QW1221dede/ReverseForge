@@ -5,7 +5,9 @@
 # @param target 文件或文件夹（从投放区取） [file]
 # @param stage 执行到哪一步 [choice:all,unpack,decrypt,patch,pack:all]
 # @param to_desktop 成品自动复制到桌面 [bool:true]
-# @param min_conf 只应用置信度不低于此值的补丁（0=跟「一键绕过」完全同款，不过滤） [int:0]
+# @param run_verify 真机安装验证（需 adb 设备） [bool:false]
+# @param ids 只打指定校验点编号，逗号分隔（空=全部启动路径） [str:]
+# @param min_conf 只应用置信度不低于此值的补丁（0=默认，不过滤） [int:0]
 
 """
 全自动化页的引擎：每一步都能单独跑，也能一口气跑完。
@@ -15,6 +17,13 @@
     patch    ③ 一键删前置验证 六类"安全"补丁（APK）；脚本类做源码文本替换
     pack     ④ 按原类型重建   ← 关键：进去什么，出来就是什么
     desktop  ⑤ 成品丢桌面    后缀跟成品真实类型走（.sh 就落 .sh）
+    verify   ⑥ 真机安装验证   勾了才做，没 adb 设备就如实写"未验证"
+
+【只有一个入口】
+    以前「卡密绕过」和「全自动化」是两套脚本、两套判据，
+    同一份 APK 一个出 20 条补丁能过、另一个出 10 条还要卡密。
+    现在合并成一个：补丁判据、重建、签名、回读、桌面投放全部只有一份实现，
+    不再存在"两边结果不一样"的可能。
 
 【④ 为什么必须按原类型重建】
     之前是「一律打成 zip」，结果 .sh 样本出来一个 zip，
@@ -490,9 +499,8 @@ def _runtime_kill_switches(rep, chosen: list) -> list:
 
 def do_patch(root: Path) -> list:
     rf.step("③ 扫描前置验证点", 45)
-    # 判据跟「一键绕过」完全一致（同一套 patch_scan / patch_plan 默认值）。
-    # 之前这里多加了 safe_only=True + min_confidence=40，把真正卡住启动的
-    # 那几个点滤掉了 —— 结果「一键绕过」能生效、全自动化打出来却还要卡密。
+    # 全工具只有这一处补丁判据（原来 15/16 各写一遍，同一份 APK
+    # 一个出 20 条能过、一个出 10 条还要卡密，就是这么来的）。
     rep = rf.patch_scan(root)
     if not rep.points:
         put("- 扫描不到校验点。两种可能：")
@@ -505,13 +513,12 @@ def do_patch(root: Path) -> list:
     pre = len(rep.pre_run)
     put(f"- 校验点 {len(rep.points)} 个（启动路径 {pre} 个）")
 
-    rf.step("③ 生成补丁方案（与一键绕过同一套判据）", 52)
-    #
-    # 第一步：与「一键绕过」**完全同一套** —— 启动路径上的点，不过滤安全、
-    #        不设置信度门槛、上限 20 条。之前这里多加了 safe_only=True +
-    #        min_confidence=40，20 条被砍到 10 条（MainActivity / LicNet /
-    #        LicenseApi / Dh 全被滤掉），所以「绕过」能生效、自动化却还要卡密。
-    ops = rf.patch_plan(rep, only_pre=True, max_ops=20,
+    rf.step("③ 生成补丁方案", 52)
+    # 只保留一套判据（原来「15 一键绕过」和这里各写一遍，结果不一致）。
+    # 第一步：启动路径上的点，不过滤安全、不设置信度门槛、上限 20 条。
+    _ids = [x.strip() for x in str(ids or "").replace("，", ",").split(",")
+            if x.strip()]
+    ops = rf.patch_plan(rep, ids=_ids or None, only_pre=True, max_ops=20,
                         min_confidence=int(min_conf or 0))
     #
     # 第二步：全自动化**唯一多出来的那一步** —— 把运行中的服务器复核 /
@@ -565,6 +572,8 @@ def do_pack(root: Path, ops: list) -> Path:
     gate["回读"] = "确认" if rb.roundtrip else "未确认"
     if not rb.ok:
         raise RuntimeError("打包失败，备份在「备份」目录。")
+    if rb.ok:
+        gate["结构"] = "通过（smali 已汇编并打进新 dex）"
     if not rb.roundtrip:
         put("- ⚠ 回读未确认：新包里没读到补丁痕迹，装上去很可能还要卡密。"
             "（回读是唯一能证明补丁真的进了 dex 的证据，不确认就别说生效）")
@@ -572,6 +581,27 @@ def do_pack(root: Path, ops: list) -> Path:
     final_apk = Path(rb.apk)
     LED.outp("④ 重打包", final_apk, "apktool 重建 + 签名 + 验签", "APK", "apk")
     return final_apk
+
+
+def do_verify(prod: Path) -> None:
+    """⑥ 真机安装：勾了 run_verify 且有 adb 设备才做；如实记录，不冒充通过。"""
+    if not bool(run_verify):
+        put("- 没勾「真机安装验证」，跳过。有设备就勾上再跑一次。")
+        return
+    rf.step("⑥ 真机安装验证", 97)
+    try:
+        ok, msg = rf.patch_install(prod, uninstall_first=True)
+    except Exception as e:                                  # noqa: BLE001
+        put(f"- 安装失败（adb 不可用？）：{e}")
+        gate["运行"] = "安装失败（adb 不可用）"
+        return
+    put(f"- 安装：{msg}")
+    if ok:
+        gate["运行"] = "已安装到设备（未自动启动界面）"
+    elif "没有连接的设备" in msg or "adb" in msg.lower():
+        gate["运行"] = f"未验证：{msg}（插上手机再勾一次即可）"
+    else:
+        gate["运行"] = f"安装失败：{msg}"
 
 
 def do_desktop(prod: Path, tag: str = "已绕过") -> None:
@@ -687,6 +717,7 @@ else:
         if stage != "patch":
             main_product = do_pack(root, ops)
             do_desktop(main_product, tag="已绕过")
+            do_verify(main_product)
         else:
             put("- 按要求只执行到打补丁（没重新打包）")
 
@@ -698,6 +729,8 @@ for k, v in gate.items():
 if _nonapk:
     put("- 非 APK 通用链路：拆解 → 解密 → 删验证 → **按原类型重建**"
         "（进去什么类型，出来还是什么类型）")
+    if bool(run_verify):
+        put("- 「真机安装验证」只对 APK 生效，本轮跳过（装不了 .sh/ELF）")
 
 md, js = _write_manifest()
 
