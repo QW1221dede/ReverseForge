@@ -17,3 +17,5 @@ analyze auth-checkpoints, auto-decrypt, patch, rebuild & re-sign — all offline
 **GNU AGPL-3.0** with additional terms: **commercial use is prohibited**.
 Any derivative (including network services) must stay AGPL-3.0 open-source
 with these terms. See [LICENSE](LICENSE).
+
+**Donation (optional)**: if this tool helps you, you can buy the author a coffee — see the 打赏 section in [README.md](README.md) (contact: m358685@163.com). Donations are voluntary and unlock nothing; every feature stays free and open-source.
