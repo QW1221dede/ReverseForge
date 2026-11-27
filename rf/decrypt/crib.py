@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 
 # 常见明文开头（按出现频率排）。长度 ≥3 才有足够辨识度
@@ -138,40 +139,64 @@ def _complete_key(data: bytes, off: int, ks: bytes, period: int) -> bytes:
     8 字节密钥）。_candidate_periods 只认 p<=L 的自洽周期，于是 p=8 被漏掉。
     这里换个思路：对 p 的每个位置 j，收集密文中所有 i%p==j 的字节，
     已知位置用 crib 的约束，未知位置试 256 种密钥取"解密后最像英文"的。
+
+    性能：原来对每个候选密钥都用 Python 生成器累加整列，一次补全 8 列要
+    二十多万次解释器调用 —— 单个混合文件就能吃掉 100 秒，直接撑爆试解预算。
+    改成「列切片 + bytes.translate + sum」：translate/sum 都在 C 层跑，
+    同样的打分结果快两个数量级。
     """
     key = bytearray(period)
     # 先填已知约束
     for i, k in enumerate(ks):
         key[i % period] = k
-    # 频率补全（英文/JSON 里空格 e t a o 最常见）
-    freq = b" etaoinshrdlcumwfgypbvkjxqz"
     for j in range(period):
         if j < len(ks):                      # 已被 crib 约束
             continue
-        col = [data[off + i] for i in range(j, len(data) - off, period)
-               if off + i < len(data)]
+        col = data[off + j::period]          # 等价于原来那个带 if 的列表推导
         if not col:
             key[j] = 0
             continue
-        best_k, best_score = 0, -1e9
-        for k in range(256):
-            plaintext = [b ^ k for b in col]
-            # 英文字符 + 常见 JSON 符号得分高，控制字符/高位字节扣分
-            sc = sum((3 if c in (32, 34, 58, 44, 125) else
-                      2 if 97 <= c <= 122 or 65 <= c <= 90 else
-                      1 if 48 <= c <= 57 else
-                      -3 if c < 32 or c > 126 else 0) for c in plaintext)
-            if sc > best_score:
-                best_score, best_k = sc, k
-        key[j] = best_k
+        key[j] = _best_key_byte(col)
     return bytes(key)
+
+
+# 每个明文字节的分数（+3 偏置，方便用无符号字节翻译表累加）
+_ORD = bytes(
+    (3 if c in (32, 34, 58, 44, 125) else
+     2 if 97 <= c <= 122 or 65 <= c <= 90 else
+     1 if 48 <= c <= 57 else
+     -3 if c < 32 or c > 126 else 0) + 3
+    for c in range(256)
+)
+_XT: list[bytes | None] = [None] * 256
+
+
+def _score_table(k: int) -> bytes:
+    """密钥字节 k 的翻译表：密文字节 → (明文字节分数 + 3)。"""
+    t = _XT[k]
+    if t is None:
+        t = bytes(_ORD[c ^ k] for c in range(256))
+        _XT[k] = t
+    return t
+
+
+def _best_key_byte(col: bytes) -> int:
+    """在一列密文上试 256 个密钥字节，返回得分最高的那个。"""
+    base = 3 * len(col)
+    best_k, best_sc = 0, -(1 << 30)
+    for k in range(256):
+        sc = sum(col.translate(_score_table(k))) - base
+        if sc > best_sc:
+            best_sc, best_k = sc, k
+    return best_k
 
 
 def crib_attack(data: bytes, cribs: list[bytes] | None = None,
                 offsets: list[int] | None = None,
                 max_period: int = 64,
                 scorer=None,
-                min_rest_printable: float = 0.85) -> list[CribHit]:
+                min_rest_printable: float = 0.85,
+                deadline: float | None = None) -> list[CribHit]:
     """
     已知明文攻击。返回按得分降序的候选。
 
@@ -190,9 +215,13 @@ def crib_attack(data: bytes, cribs: list[bytes] | None = None,
     seen: set[bytes] = set()
 
     for off in offs:
+        if deadline is not None and time.time() > deadline:
+            break
         if off < 0 or off >= len(data) - 8:
             continue
         for crib in use_cribs:
+            if deadline is not None and time.time() > deadline:
+                break
             L = len(crib)
             if L < 3 or off + L > len(data):
                 continue
@@ -205,6 +234,8 @@ def crib_attack(data: bytes, cribs: list[bytes] | None = None,
                 if L < p <= max_period and p not in periods:
                     periods.append(p)
             for p in periods:
+                if deadline is not None and time.time() > deadline:
+                    break
                 if p <= L:
                     key = derive_key(ks, p)
                 else:

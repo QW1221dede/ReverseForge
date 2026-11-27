@@ -88,17 +88,33 @@ def split_ext(name: str) -> tuple[str, str]:
     return n[:i], n[i:]
 
 
+_REPEAT_TAG = re.compile(
+    r"[_\-\s]*(?:已绕过|已处理|已解密|已重打包|已修复|已破解)(?:[_\-\s]*\d+)?$"
+)
+
+
+def strip_tags(stem: str) -> str:
+    """去掉本工具上次留下的后缀，避免 `XX_已绕过_已绕过` 这种叠罗汉。"""
+    prev = ""
+    while prev != stem:
+        prev = stem
+        stem = _REPEAT_TAG.sub("", stem).rstrip("_- ")
+    return stem or prev
+
+
 def base_stem(name: str) -> str:
     """成品命名用的主体名：`ACE拦截2.0.apk.1` → `ACE拦截2.0`。
 
     下载器常在 .apk 后面加 `.1`；不处理的话产物会叫
     `ACE拦截2.0.apk_已绕过.apk`，看着像坏文件。
+    已经被处理过的名字（`_已绕过` / `_已处理` / `_已绕过_6`）先剥掉再拼，
+    否则连跑两次就变成 `ACE拦截2.0_已绕过_6_已绕过.apk`。
     """
     n = Path(name).name
     m = re.match(r"(?i)^(.*)\.(apk|aab|apks|xapk)(\.\d+)?$", n)
     if m and m.group(1):
-        return m.group(1)
-    return split_ext(n)[0]
+        return strip_tags(m.group(1))
+    return strip_tags(split_ext(n)[0])
 
 
 def unique_path(directory: Path, name: str) -> Path:
@@ -128,6 +144,7 @@ def drop_to_desktop(src: str | Path, name: str = "",
     # name 传进来时**已经是主体名**（可能自带点，如 ACE拦截2.0），
     # 不能再走 Path(name).stem —— 那会把 .0 当后缀吃掉。
     stem = safe_name(name) if name else safe_name(split_ext(s.name)[0])
+    stem = strip_tags(stem) or stem
     _, ext = split_ext(s.name)          # 真实后缀，可能为空（无后缀文件）
     out = unique_path(desk, f"{stem}_{tag}{ext}")
     shutil.copy2(s, out)

@@ -1082,6 +1082,63 @@ if _hr is not None:
     LED.outp("③a 加固体检", _hmd, "壳/抽取/动态加载/原生库清单", "体检报告")
     body.append(f"- 加固体检 → `{_hmd.name}`")
 
+def _tidy_output() -> Path:
+    """
+    产物目录收成「小白版」：根目录只留成品 + 使用说明，其余全部收进 详细资料/。
+
+    为什么：一次处理会在根目录吐出 12 项（apk / idsig / 报告 / 清单 / 体检 /
+    hook_net.js / 备份 / 已解密 / unpack / _verify_* / manifest.json …），
+    使用者根本不知道该点哪个。收拢之后他要的文件永远在最上面那条。
+    """
+    detail = out / "详细资料"
+    keep = {"使用说明.txt", detail.name}
+    if main_product is not None:
+        keep.add(main_product.name)
+        # v4 签名伴生文件必须跟成品放一起，挪走会让增量安装失效
+        for sib in out.glob(main_product.stem + "*.idsig"):
+            keep.add(sib.name)
+    for p in sorted(out.iterdir()):
+        if p.name in keep:
+            continue
+        try:
+            detail.mkdir(exist_ok=True)
+            p.rename(detail / p.name)
+        except OSError as exc:                          # noqa: BLE001
+            rf.log(f"  （整理产物：{p.name} 没能移动，留在根目录 —— {exc}）")
+    return detail
+
+
+def _usage_note(detail: Path) -> str:
+    """给使用者看的第一份文件：三句话说清「装哪个、别的不用管、出事看哪」。"""
+    kind = getattr(_kind, "label", "目录") if _kind else "目录"
+    L = ["这个文件夹是什么", "",
+         f"　　你拖进来的「{target.name}」（{kind}）已经处理完了。", ""]
+    if main_product is not None and main_product.exists():
+        L += ["要用的文件", "",
+              f"　　{main_product.name}　（{_human(main_product.stat().st_size)}）", ""]
+        if main_product.suffix.lower() in (".apk", ".apks", ".xapk"):
+            L += ["　　传到手机上点开安装；装之前先把原来的同名应用卸掉。",
+                  "　　系统提示「未知来源」「Play 保护机制已拦截」时，选「仍然安装」。", ""]
+        elif main_product.suffix.lower() in (".zip", ".7z", ".rar", ".tar", ".gz"):
+            L += ["　　这是压缩包，直接解压使用；已经按原类型重新打包好了。", ""]
+        else:
+            L += ["　　按原类型重建的可执行文件/脚本，直接使用即可。", ""]
+    else:
+        L += ["要用的文件", "",
+              "　　本次没有生成成品（执行范围停在中间步骤），", ""
+              f"　　中间结果在 {detail.name}/ 里。", ""]
+    L += ["别的都不用管", "",
+          f"　　{detail.name}/ 是过程记录和中间文件，平时可以直接删：", "",
+          "　　　全自动化报告.md　这次到底改了什么、改成什么样（最重要）",
+          "　　　产物清单.md　　　进去的是什么、出来的是什么",
+          "　　　设备日志.txt　　 开了真机验证才有，记录装上去能不能跑", ""]
+    L += ["装上打不开 / 打开就退怎么办", "",
+          f"　　打开 {detail.name}/全自动化报告.md，翻到最后一节「三、结果」，",
+          "　　里面按「补丁 / 守卫 / 拒跑 / 联网 / 运行」逐项写了成没成、没成的原因。", "",
+          "　　（本工具只做本地分析，原始文件从未被修改。）"]
+    return "\n".join(L) + "\n"
+
+
 md, js = _write_manifest()
 
 # 报告 = 头 + 进→出表 + 过程 + 结果
@@ -1094,12 +1151,19 @@ final_md = out / "全自动化报告.md"
 final_md.write_text("\n".join(head + _io_tables() + [""] + body),
                     encoding="utf-8")
 
-# 成品是归档就把清单/报告塞进去
+# 成品是归档就把清单/报告塞进去（在收拾目录之前塞，路径还是平的）
 if main_product is not None and main_product.suffix.lower() == ".zip":
     _append_into_zip(main_product, [f for f in (md, js, final_md, _hmd) if f])
 
-rf.log(f"✓ 报告：{final_md}")
-rf.log(f"✓ 清单：{md}")
+detail = _tidy_output()
+note = out / "使用说明.txt"
+note.write_text(_usage_note(detail), encoding="utf-8")
+
+rf.log("── 产物 ──")
+if main_product is not None:
+    rf.log(f"  成品：{main_product.name}　（{_human(main_product.stat().st_size)}）")
+rf.log(f"  说明：{note.name}")
+rf.log(f"  过程记录：{detail.name}/（报告 / 清单 / 中间文件）")
 if LED.outputs:
     rf.log("── 进 → 出 ──")
     rf.log(f"  进：{target.name}（{getattr(_kind, 'label', '目录')}）")

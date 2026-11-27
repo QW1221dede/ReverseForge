@@ -174,7 +174,8 @@ def parse(data: bytes, offset: int = 0, max_len: int | None = None) -> ELFInfo |
 
     # ---- section headers（有就更好，能直接拿符号表）----
     symtab: tuple[int, int] | None = None      # (offset, count)
-    strtab: tuple[int, int] | None = None
+    strtab: tuple[int, int] | None = None      # (offset, 忽略)
+    secs: list[tuple[int, int, int, int, int, int]] = []   # name,type,off,size,entsize,link
     for i in range(min(info.shnum, 512)):
         base = offset + shoff + i * (shentsize or (64 if info.bit == 64 else 40))
         try:
@@ -182,24 +183,34 @@ def parse(data: bytes, offset: int = 0, max_len: int | None = None) -> ELFInfo |
             sh_type = _u(data, base + 4, 4, e)
             sh_off = _u(data, base + 24 if info.bit == 64 else base + 16, 8 if info.bit == 64 else 4, e)
             sh_size = _u(data, base + 32 if info.bit == 64 else base + 20, 8 if info.bit == 64 else 4, e)
+            sh_link = _u(data, base + 40 if info.bit == 64 else base + 24, 4, e)
             sh_entsize = _u(data, base + 56 if info.bit == 64 else base + 36, 8 if info.bit == 64 else 4, e)
         except ValueError:
             continue
+        secs.append((sh_name, sh_type, sh_off, sh_size, sh_entsize, sh_link))
         end = max(end, offset + sh_off + sh_size)
-        if sh_type == SHT_DYNSYM and sh_entsize:
-            symtab = (offset + sh_off, sh_size // sh_entsize)
-            info.sections.append(".dynsym")
-            strtab = (offset + sh_off + sh_size * 0, 0)
-    # .shstrtab 名字（有节名表才读）
-    try:
-        shstr_off = _u(data, offset + shoff + (60 if info.bit == 64 else 48) * 0 + 0, 1, e)
-    except ValueError:
-        shstr_off = 0
 
-    # ---- 若没有节表，用 DT_HASH 推符号数量 ----
-    if symtab is None and "off" in dyn:
+    # 符号名要从 .dynstr 读：sh_link 指向字符串表所在的节。
+    # 之前这里写成 strtab = (offset+sh_off, 0)，把符号表自己当字符串表，
+    # 算出来的 `st_name` 全部落在符号表数据里 → 符号名是乱码。
+    for _n, s_type, s_off, s_size, s_entsize, s_link in secs:
+        if s_type == SHT_DYNSYM and s_entsize:
+            symtab = (offset + s_off, s_size // s_entsize)
+            if 0 < s_link < len(secs):
+                str_off = secs[s_link][2]
+                if str_off:
+                    strtab = (offset + str_off, 0)
+            info.sections.append(".dynsym")
+            break
+
+    # ---- 解析动态段 ----
+    # 注意：这不能塞进 `if symtab is None` 分支里。带节表的普通 .so 一定能
+    # 从节表拿到 symtab，一旦整段被跳过，DT_NEEDED（依赖库）就永远是空的 ——
+    # 而「这个 so 依赖什么」正是判断运行时崩溃原因的关键线索。
+    if "off" in dyn:
         d_off = offset + dyn["off"]
         entsz = 16 if info.bit == 64 else 8
+        entries: list[tuple[int, int]] = []
         for i in range(min(dyn["size"] // entsz, 512)):
             base = d_off + i * entsz
             try:
@@ -213,11 +224,21 @@ def parse(data: bytes, offset: int = 0, max_len: int | None = None) -> ELFInfo |
                 break
             if tag == 0:
                 break
-            dyn[tag] = val
-        str_o = v2o(dyn.get(DT_STRTAB, 0))
-        sym_o = v2o(dyn.get(DT_SYMTAB, 0))
-        h_o = v2o(dyn.get(DT_HASH, 0))
-        if sym_o is not None:
+            entries.append((tag, val))
+        vals = {t: v for t, v in entries}
+        str_o = v2o(vals.get(DT_STRTAB, 0))
+        sym_o = v2o(vals.get(DT_SYMTAB, 0))
+        h_o = v2o(vals.get(DT_HASH, 0))
+
+        for tag, val in entries:
+            if tag == DT_NEEDED and str_o is not None:
+                s = data[str_o + val: str_o + val + 128].split(b"\x00")[0]
+                t = s.decode("latin1", "ignore")
+                if t and t not in info.needed:
+                    info.needed.append(t)
+
+        # 没有节表时才需要靠 DT_HASH 推符号数量
+        if symtab is None and sym_o is not None:
             count = 0
             if h_o is not None:
                 try:
@@ -228,25 +249,6 @@ def parse(data: bytes, offset: int = 0, max_len: int | None = None) -> ELFInfo |
                 count = 256                              # 保守估一个上限
             symtab = (sym_o, min(count, 20000))
             strtab = (str_o, 0) if str_o else None
-        # DT_NEEDED
-        for i in range(min(dyn["size"] // entsz, 512)):
-            base = d_off + i * entsz
-            try:
-                if info.bit == 64:
-                    tag = _u(data, base, 8, e)
-                    val = _u(data, base + 8, 8, e)
-                else:
-                    tag = _u(data, base, 4, e)
-                    val = _u(data, base + 4, 4, e)
-            except ValueError:
-                break
-            if tag == 0:
-                break
-            if tag == DT_NEEDED and str_o is not None:
-                s = data[str_o + val: str_o + val + 128].split(b"\x00")[0]
-                t = s.decode("latin1", "ignore")
-                if t and t not in info.needed:
-                    info.needed.append(t)
 
     # ---- 读动态符号名 ----
     if symtab and strtab and strtab[0]:

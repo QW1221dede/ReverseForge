@@ -677,7 +677,6 @@ def _string_gate_ops(m: _Method) -> list[Suggestion]:
         if not sm:
             continue
         reg = sm.group(1)
-        new_line = re.sub(r'""\s*$', '"RF-OK"', t, count=1)
         for fwd in range(idx + 1, min(len(m.body), idx + 6)):
             bt = m.body[fwd][1]
             rm = re.match(r"^return-object\s+" + re.escape(reg) + r"$", bt)

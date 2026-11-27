@@ -109,7 +109,7 @@ WORD_CN: dict[str, str] = {
     "imsi": "IMSI", "mac": "MAC 地址", "ip": "IP 地址", "wifi": "WiFi",
     "network": "网络", "mobile": "移动网络", "location": "定位",
     "gps": "GPS", "camera": "相机", "mic": "麦克风", "audio": "音频",
-    "video": "视频", "media": "媒体", "sms": "短信", "call": "通话",
+    "video": "视频", "media": "媒体", "sms": "短信", "phone_call": "通话",
     "contact": "联系人", "calendar": "日历", "clipboard": "剪贴板",
     "notification": "通知", "alarm": "闹钟", "battery": "电池",
     "storage": "存储", "memory": "内存", "cpu": "CPU", "disk": "磁盘",

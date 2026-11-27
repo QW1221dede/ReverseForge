@@ -425,8 +425,17 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         except Exception as e:                                  # noqa: BLE001
             rep.notes.append(f"多层封装拆解失败：{e}")
 
-    # 打分只看样本，命中后全文重解
-    sample = data[:256 * 1024]
+    # 打分只看样本，命中后全文重解。
+    # 混合文件（明文头 + 密文）必须先跳过明文头：拿整份数据当样本，
+    # 明文头会把密钥流的相位和分数一起带偏 —— 正确的密钥也会被判成 0 分。
+    _head_off = seg.split.head_end if (seg.split.found and seg.split.head_end > 0) else 0
+    sample = data[_head_off:_head_off + 256 * 1024]
+
+    def _phase_apply(fn) -> bytes:
+        """让密钥流从密文起点开始：明文头原样保留，只解后半段。"""
+        if _head_off <= 0:
+            return fn(data)
+        return data[:_head_off] + fn(data[_head_off:])
 
     # ---- 1) 编码 / 压缩（最多剥三层：base64→base64→zlib 这种套娃很常见）----
     _ENCODERS = (("Base64", C.b64_decode_any), ("Base32", C.b32_decode_any),
@@ -561,7 +570,8 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     crib_offs_body = [0]
     try:
         for ch in CR.crib_attack(crib_target, cribs=all_cribs,
-                                 offsets=crib_offs_body, scorer=score_output):
+                                 offsets=crib_offs_body, scorer=score_output,
+                                 deadline=deadline):
             if not ch.plain:
                 continue
             sc = ch.score or score_output(ch.plain)
@@ -609,34 +619,35 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
 
         dec = C.xor_bytes(sample, raw)
         if dec:
-            full = C.xor_bytes(data, raw)
-            add(f"密钥 XOR（{_ks(val)}）", full, 0, key=val, note=src)
+            full = _phase_apply(lambda d: C.xor_bytes(d, raw))
+            add(f"密钥 XOR（{_ks(val)}）", full, _head_off, key=val, note=src)
             # 相位自适应：密钥流在密文里是从中间某处开始循环的，
             # 相位差一位就全盘皆输 —— 样本接近可读但没过线时，把所有相位都试一遍
             sc0 = score_output(dec)
             if 28 <= sc0 < 45 and 2 <= len(raw) <= 64:
-                best_ph, best_out = -1, b""
+                best_ph = -1
                 for ph in range(1, len(raw)):
                     rot = raw[ph:] + raw[:ph]
                     d = C.xor_bytes(sample, rot)
                     if score_output(d) > max(sc0, 0) + 8:
-                        best_ph, best_out = ph, d
+                        best_ph = ph
                 if best_ph >= 0:
+                    rot = raw[best_ph:] + raw[:best_ph]
                     add(f"密钥 XOR（{_ks(val)} · 相位+{best_ph}）",
-                        C.xor_bytes(data, raw[best_ph:] + raw[:best_ph]), 0,
+                        _phase_apply(lambda d: C.xor_bytes(d, rot)), _head_off,
                         key=val, note=f"{src}·相位对齐")
 
         if len(raw) >= 4 and tried_keys <= 40:
-            rc = C.rc4(data, raw)
-            add(f"RC4（{_ks(val)}）", rc, 0, key=val, note=src)
+            rc = _phase_apply(lambda d: C.rc4(d, raw))
+            add(f"RC4（{_ks(val)}）", rc, _head_off, key=val, note=src)
             # drop 变体：很多实现会先空转 768 轮（OpenSSL/WiFi WEP 常见），
             # 不对齐的话前 768 字节全是乱的，整段打分永远过不了线。
             for drop in (768, 3072):
                 rcd = C.rc4(sample, raw, drop=drop)
                 if score_output(rcd) >= 45:
                     add(f"RC4-drop{drop}（{_ks(val)}）",
-                        C.rc4(data, raw, drop=drop), 0, key=val,
-                        note=f"{src}·空转{drop}轮")
+                        _phase_apply(lambda d: C.rc4(d, raw, drop=drop)), _head_off,
+                        key=val, note=f"{src}·空转{drop}轮")
 
         if tried_keys <= 20 or sc >= 70 or src.startswith(("用户", "明文头")):
             for kb, how in K.KeyCand(value=val, source=src).variants((16,)):

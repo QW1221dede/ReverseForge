@@ -63,9 +63,9 @@ def install_wheel_routing(root: tk.Misc) -> None:
         return None
 
     root.bind_all("<MouseWheel>", _wheel, add="+")
-    # Linux/X11 用 Button-4/5
-    root.bind_all("<Button-4>", lambda e: _wheel(_FakeWheel(e, -1)), add="+")
-    root.bind_all("<Button-5>", lambda e: _wheel(_FakeWheel(e, 1)), add="+")
+    # Linux/X11 用 Button-4/5：Button-4 是「向上滚」，对应 Windows 的 delta=+120
+    root.bind_all("<Button-4>", lambda e: _wheel(_FakeWheel(e, 1)), add="+")
+    root.bind_all("<Button-5>", lambda e: _wheel(_FakeWheel(e, -1)), add="+")
 
 
 class _FakeWheel:
@@ -98,43 +98,83 @@ def _view(w) -> tuple[float, float]:
 # ----------------------------------------------------------------------
 class AutoScrollbar(ttk.Scrollbar):
     """
-    内容装得下时自动消失的竖向滚动条（仅支持 pack 布局）。
+    内容装得下时自动消失的滚动条（纵/横都支持，pack 与 grid 都支持）。
 
-    用法：sb = AutoScrollbar(容器, 目标控件)；sb.pack(side="right", fill="y")
-    它会自己接管目标的 yscrollcommand，不需要再 configure 一次。
+    坑：光靠目标的 scrollcommand 回调判断是不够的 —— 内容一开始就装得下时，
+    这条回调可能一次都不触发，滚动条就永远挂着一条拖不动的灰条（用户口径：
+    「多余的滑不动」）。所以额外在 after_idle 和目标 <Configure> 时主动核一次。
     """
 
-    def __init__(self, master, target, **kw):
-        super().__init__(master, orient="vertical", command=target.yview, **kw)
+    def __init__(self, master, target, axis: str = "y", **kw):
         self._target = target
-        self._packed = False
-        self._side = "right"
-        target.configure(yscrollcommand=self._on_scroll)
+        self._axis = axis
+        self._how: tuple[str, dict] | None = None
+        vertical = axis == "y"
+        super().__init__(
+            master,
+            orient="vertical" if vertical else "horizontal",
+            command=target.yview if vertical else target.xview,
+            **kw,
+        )
+        if vertical:
+            target.configure(yscrollcommand=self._on_view)
+        else:
+            target.configure(xscrollcommand=self._on_view)
+        target.bind("<Configure>", lambda _e: self.refresh(), add="+")
+        self.after_idle(self.refresh)
 
-    def _on_scroll(self, first, last):
+    # -- 摆放 ---------------------------------------------------------
+    def show(self, manager: str = "pack", **kw) -> None:
+        """按指定方式摆放一次，并记住参数；之后隐藏/恢复都还原这里。"""
+        self._how = (manager, kw)
+        getattr(self, manager)(**kw)
+        self.refresh()
+
+    # 兼容老写法：sb.pack(side="right", fill="y")
+    def pack(self, **kw):                                # noqa: A003
+        self._how = ("pack", kw)
+        super().pack(**kw)
+        self.refresh()
+
+    def grid(self, **kw):
+        self._how = ("grid", kw)
+        super().grid(**kw)
+        self.refresh()
+
+    # -- 显示/隐藏 ----------------------------------------------------
+    def refresh(self) -> None:
+        try:
+            first, last = self._target.yview() if self._axis == "y" else self._target.xview()
+        except Exception:                                # noqa: BLE001
+            return
+        self._on_view(first, last)
+
+    def _on_view(self, first, last) -> None:
         ttk.Scrollbar.set(self, first, last)
         try:
             full = float(first) <= 0.0 and float(last) >= 1.0
         except (TypeError, ValueError):
             full = False
-        if full and self._packed:
-            self.pack_forget()
-            self._packed = False
-        elif not full and not self._packed:
-            self.pack(side=self._side, fill="y")
-            self._packed = True
-
-    # 允许外部按普通滚动条那样 pack
-    def pack(self, **kw):                                # noqa: A003
-        self._side = kw.get("side", "right")
-        super().pack(**kw)
-        self._packed = True
+        if self._how is None:
+            return
+        manager, kw = self._how
+        mapped = bool(self.winfo_manager())
+        if full and mapped:
+            if manager == "grid":
+                self.grid_remove()
+            else:
+                self.pack_forget()
+        elif not full and not mapped:
+            if manager == "grid":
+                super().grid(**kw)
+            else:
+                super().pack(**kw)
 
 
 def mount_scroll(widget, parent=None, side: str = "right"):
     """建一条自动隐藏的竖滚动条并 pack 好，返回滚动条对象。"""
-    sb = AutoScrollbar(parent or widget.master, widget)
-    sb.pack(side=side, fill="y")
+    sb = AutoScrollbar(parent or widget.master, widget, axis="y")
+    sb.show("pack", side=side, fill="y")
     return sb
 
 
@@ -277,11 +317,10 @@ class CodeBox(tk.Frame):
                                 bg=bg, fg="#e6edf3", insertbackground="#e6edf3")
         else:
             self.text = factory(self)
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
-        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.text.xview)
-        self.text.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+        self.vsb = AutoScrollbar(self, self.text, axis="y")
+        self.hsb = AutoScrollbar(self, self.text, axis="x")
         self.text.grid(row=0, column=0, sticky="nsew")
-        self.vsb.grid(row=0, column=1, sticky="ns")
-        self.hsb.grid(row=1, column=0, sticky="ew")
+        self.vsb.show("grid", row=0, column=1, sticky="ns")
+        self.hsb.show("grid", row=1, column=0, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
