@@ -26,6 +26,9 @@ build/
 Thumbs.db
 Desktop.ini
 
+# --- 开发自测（不随仓库发布，仅本机保留） ---
+tests/
+
 # --- 本地敏感/临时 ---
 *.token
 secrets.*

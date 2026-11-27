@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">RF 授权样本</string>
-    <string name="licensed">已授权</string>
-    <string name="denied">授权失败：卡密无效或已到期</string>
-</resources>

@@ -345,7 +345,7 @@ AES/RC4 这类真加密不受影响：它们的密钥流不重复，crib 只能�
 `{` `[` `<` 这类单字节"弱魔数"必须先确认文本可读才加分，
 否则随机垃圾首字节撞上 `{` 就会被报成 JSON（这个坑踩过，自测里专门有一条守着）。
 
-实测（`tests/selftest_decrypt.py`，12 组真加密样本）：
+实测（12 组真加密样本）：
 
 | 场景 | 结果 |
 |---|---|
@@ -742,7 +742,7 @@ rf.compose(["patch.rebuild"], out="scripts/my_patch.py")
 补丁页选补丁点 → 改法送终端 → 预演 → 确认改法 → 落盘
 ```
 
-自测（`tests/gui_repl_test.py`）覆盖：送终端、运行、变量保留（21×2=42）、
+回归自测覆盖：送终端、运行、变量保留（21×2=42）、
 出错不崩、存回积木、补丁改法代码可编译。
 一个坑记一下：tkinter 的 `after()` 在主循环没跑的时候会抛
 `RuntimeError: main thread is not in main loop`，所以这类测试必须 `mainloop()` + `after` 串起来，
@@ -918,15 +918,7 @@ reverseforge/
 │  ├─ secure/crypto.py    AES-GCM / ChaCha20 / HMAC / PBKDF2 / scrypt
 │  └─ ui/                 界面（theme / app / dropzone，含「卡密绕过」页）
 │     └─ dropzone.py      左栏投放区（拖拽 + 队列 + 类型识别）
-├─ scripts/               内置脚本 + ghidra/DecompileToFile.py
-└─ tests/                 自检与截图
-   ├─ build_sample_apk.py 造带卡密校验的样本 APK（aapt2/javac/d8）
-   ├─ selftest_patch.py   识别→预演→反向测试→应用→重建→回滚
-   ├─ selftest_core.py    加密/语法/积木库
-   ├─ selftest_decrypt.py 12 组真加密样本 → 自动试解（含"必须解不出"的反例）
-   ├─ selftest_auth.py    脚本/伪 PE 校验点识别 → 自动改 → 语法复查
-   ├─ gui_repl_test.py    代码终端：送码/运行/变量保留/出错/存回积木
-   └─ gui_patch_test.py   界面扫描与预演联动
+└─ scripts/               内置脚本 + ghidra/DecompileToFile.py
 ```
 
 运行期数据在 `%LOCALAPPDATA%\ReverseForge\`：`workspace/`（每次任务一个目录）、
