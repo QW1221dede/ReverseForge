@@ -68,6 +68,18 @@ def do_unpack() -> Path:
         put("- 已是解包目录，跳过拆包")
         return target
     rf.step("① 一键拆包", 8)
+    # 非 APK 容器（zip/rar/iso/文档…）自动切通用拆解
+    kind = rf.file_type(target)
+    if kind.real != "apk":
+        put(f"- 识别为 {kind.label}，不是 APK → 走通用拆解")
+        r = rf.unpack_any(target, out=out / "unpack")
+        put(f"- ✓ {r['method']}（{r['files']} 个文件）")
+        for n in r["notes"][:3]:
+            put(f"    · {n}")
+        if stage == "unpack":
+            return target          # 非 APK 没有后续补丁/打包流程
+        raise RuntimeError("该文件不是 APK，无法走「删验证 + 打包」流程；"
+                           "用「通用拆解（任何文件）」脚本或单独跑拆包即可")
     un = rf.apk_unpack(target, out=out / "unpack", apktool=True, jadx=False)
     if not un.apktool_dir:
         raise RuntimeError("拆包失败：" + "；".join(un.errors[:3]))

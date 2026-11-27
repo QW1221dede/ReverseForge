@@ -732,6 +732,263 @@ class Api:
             self.log(res.table(limit=15))
         return res
 
+    # =================== 通用拆解（不止 APK） ===================
+    # Python zipfile 原生可解的 ZIP 家族（含 JAR / OOXML / wheel）
+    _ZIP_REALS = ("zip", "jar", "docx", "xlsx", "pptx", "whl", "pyz", "egg",
+                  "ipa", "appx", "msix", "crx", "xpi", "epub", "nupkg",
+                  "vsix", "aar", "war", "ear", "odt", "ods", "odp", "sketch")
+    # 7-Zip（完整版）才认识的容器：压缩 / 归档 / 磁盘镜像 / 安装器 / OLE / CHM
+    _7Z_REALS = ("rar", "7z", "zstd", "lzma", "lz4", "lzip", "lzop", "z",
+                 "iso", "dmg", "msi", "wim", "cab", "vhd", "vhdx",
+                 "ar", "rpm", "squashfs",
+                 "ole", "doc", "xls", "ppt", "msg", "mdb", "one", "chm")
+    # Python 原生 tar/gzip/lzma 就能拆的
+    _NATIVE_REALS = ("tar", "tgz", "gzip", "bzip2", "xz")
+    # 有专用重武器（apktool/jadx）的类型，先走 APK 全流程
+    _APK_REALS = ("apk",)
+
+    def unpack_any(self, path: str | Path, out: str | Path | None = None,
+                   deep: bool = False) -> dict:
+        """
+        通用拆解：按识别出的类型自动选最合适的拆法。
+
+        - APK/AAB/APKS/XAPK → apktool + jadx 全流程（同 apk_unpack）
+        - ZIP/RAR/7z/gzip/xz/tar/ISO/DMG/MSI/JAR/OOXML → 7-Zip 全量解出
+        - EXE/DLL（PE）→ 7-Zip 抽资源节 + 字符串清单
+        - 其它（ELF/脚本/密文…）→ 分段 + 字符串画像落盘
+
+        返回 dict：type/output/files/method/notes。
+        """
+        import zipfile as _zf
+
+        p = self._need_file(path)
+        kind = ftmod.sniff(p)
+        real = kind.real
+        dst = Path(out) if out else (self.out_dir / ("unpack_" + p.stem))
+        dst.mkdir(parents=True, exist_ok=True)
+        notes: list[str] = []
+        res = {"type": f"{kind.label}（{real}）", "output": str(dst),
+               "files": 0, "method": "", "notes": notes}
+
+        # ---- 1) APK 家族 → 现有全流程 ----
+        if real in self._APK_REALS:
+            res["method"] = "apktool+jadx（APK 全流程）"
+            ur = self.apk_unpack(p, dst)
+            res["files"] = ur.files if hasattr(ur, "files") else -1
+            res["notes"].append("APK 走专用链路：资源解包 + 源码反编译")
+            return res
+
+        # ---- 2) 多 APK 打包体（APKS/XAPK/AAB）：先解出内层 APK ----
+        if p.suffix.lower() in (".apks", ".xapk") or real == "aab":
+            res["method"] = "7z 解容器 → 内层 APK 再走全流程"
+            seven = self._tool("7z")
+            if seven and seven.available:
+                runner.run(seven.cmd("x", p, f"-o{dst}", "-y"),
+                           timeout=600, on_line=self.ctx.log, log_name="unpack_any_7z")
+            inner = list(dst.rglob("*.apk"))[:3]
+            if inner:
+                notes.append("内层 APK：" + "、".join(a.name for a in inner)
+                             + "（可分别丢进来走 APK 全流程）")
+            else:
+                notes.append("容器里没找到内层 .apk，请人工检查 " + str(dst))
+            self._count_files(res, dst)
+            return res
+
+        # ---- 2.5) ZIP 家族 → Python 原生解压（不依赖外部 7z） ----
+        if real in self._ZIP_REALS:
+            self.ctx.step("解压 ZIP 家族", 30)
+            fixed = 0
+            try:
+                with _zf.ZipFile(p) as z:
+                    for info in z.infolist():
+                        # 非 UTF-8 标志位的文件名按 cp437 解出的是乱码，修成中文
+                        name = info.filename
+                        if info.flag_bits & 0x800 == 0:
+                            try:
+                                name = name.encode("cp437").decode("gbk")
+                                fixed += 1
+                            except (UnicodeEncodeError, UnicodeDecodeError):
+                                name = info.filename
+                        target = (dst / name)
+                        if name.endswith("/") or name.endswith("\\"):
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        # 防路径穿越（zip-slip）
+                        if not str(target.resolve()).startswith(str(dst.resolve())):
+                            notes.append(f"跳过越界条目：{name}")
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with z.open(info) as src, open(target, "wb") as fout:
+                            shutil.copyfileobj(src, fout, 1 << 20)
+                res["method"] = f"原生解压（ZIP 家族：{real}）"
+                self._count_files(res, dst)
+                if fixed:
+                    notes.append(f"修复了 {fixed} 个中文文件名的乱码")
+                if real in ("docx", "xlsx", "pptx"):
+                    notes.append("OOXML 已拆开：正文在 word/ xl/ ppt/ 子目录，"
+                                 "核心内容是 XML，可直接检索")
+                if real == "jar":
+                    notes.append("JAR 已解开；若含 .dex/.class，丢进 APK 页可用 "
+                                 "jadx 反编译")
+                return res
+            except Exception as e:                                  # noqa: BLE001
+                notes.append(f"原生解压失败（可能加密包）：{e}")
+                if real == "zip":
+                    notes.append("可用「识别」页的 zip_password 尝试已知明文攻击")
+
+        # ---- 2.6) tar / tar.gz / tar.bz2 / tar.xz / 裸 gzip、bzip2、xz ----
+        # tarfile 原生通吃三种压缩，零外部依赖
+        if real in self._NATIVE_REALS:
+            import tarfile as _tf
+            import gzip as _gz
+            import lzma as _lz
+            import bz2 as _bzip
+            self.ctx.step("原生解压 tar 家族", 30)
+            extracted = False
+            try:
+                with _tf.open(p, "r:*") as t:          # 自动认 gz/bz2/xz/裸 tar
+                    t.extractall(dst, filter="data")
+                extracted = True
+                res["method"] = "原生解压（tar 家族，tarfile 自动认压缩）"
+            except _tf.ReadError:
+                # 不是 tar 的裸压缩流（单文件）：解出原名
+                stem = p.name
+                for suf in (".gz", ".bz2", ".xz", ".tgz", ".bz"):
+                    if stem.lower().endswith(suf):
+                        stem = stem[: -len(suf)]
+                        break
+                if stem == p.name:
+                    stem += ".out"
+                if real == "xz":
+                    opener = _lz.open
+                elif real == "bzip2":
+                    opener = _bzip.open
+                else:
+                    opener = _gz.open
+                try:
+                    with opener(p, "rb") as src, open(dst / stem, "wb") as fout:
+                        shutil.copyfileobj(src, fout, 1 << 20)
+                    extracted = True
+                    res["method"] = f"原生解压（裸 {real} 流 → {stem}）"
+                except (OSError, EOFError, _lz.LZMAError) as e:
+                    notes.append(f"原生解压失败：{e}")
+            if extracted:
+                self._count_files(res, dst)
+                notes.append("tar 家族拆解不依赖 7-Zip，任何机器都能跑")
+                return res
+
+        # ---- 3) 7-Zip 通吃的容器（优先完整版 7z.exe，7zr 只认 .7z） ----
+        seven = self._tool("7z")
+        seven_cmd = self._seven_cmd(seven)
+
+        def _seven_extract(dest: Path, fmt: str = "") -> bool:
+            if not seven_cmd:
+                notes.append("未找到可用的 7-Zip（需要完整版 7z.exe，"
+                             "7zr.exe 只认 .7z）；一键安装会带齐")
+                return False
+            r = runner.run(list(seven_cmd) + ["x", str(p), f"-o{dest}", "-y"],
+                           timeout=900, on_line=self.ctx.log,
+                           log_name="unpack_any_7z")
+            if dest.exists() and any(dest.iterdir()):
+                return True
+            notes.append(f"7-Zip 退出码 {r.rc}（{fmt or real}），可能加密/损坏："
+                         + r.tail(3).replace("\n", " / "))
+            return False
+
+        if (real in self._7Z_REALS) and seven and seven.available:
+            self.ctx.step("7-Zip 解压", 30)
+            if _seven_extract(dst):
+                res["method"] = f"7-Zip（{real} 容器全量解出）"
+                self._count_files(res, dst)
+                # gzip/bzip2/xz 解出来的还是 tar 的话，再拆一层
+                inner_tars = list(dst.glob("*.tar"))[:1]
+                if inner_tars and seven_cmd:
+                    sub = dst / (inner_tars[0].stem or "tar_inner")
+                    if _seven_extract(sub, "tar"):
+                        notes.append(f"内层 tar 也拆了 → {sub.name}/")
+                return res
+
+        # ---- 4) PE（EXE/DLL/SYS）：7-Zip 能直接抽资源节 ----
+        if real == "pe" and seven_cmd:
+            self.ctx.step("抽取 PE 资源", 40)
+            r = runner.run(list(seven_cmd) + ["x", str(p),
+                                              f"-o{dst / 'resources'}", "-y"],
+                           timeout=300, log_name="unpack_any_pe")
+            if (dst / "resources").exists() and any((dst / "resources").iterdir()):
+                notes.append("PE 资源已抽出（图标/版本/内嵌文件常在这）")
+                res["method"] = "7-Zip PE 资源抽取"
+            else:
+                notes.append("资源节为空或加密壳，改看字符串与分段")
+            from rf.analysis import strings as _strings
+            try:
+                sf = dst / "字符串清单.txt"
+                rows = _strings.extract(p) if hasattr(_strings, "extract") else []
+                sf.write_text("\n".join(rows[:5000]), encoding="utf-8", errors="replace")
+                res["files"] = sum(1 for _ in dst.rglob("*") if _.is_file())
+                notes.append(f"字符串清单 → {sf.name}（URL/密钥/提示文案常在这）")
+                return res
+            except Exception as e:                                  # noqa: BLE001
+                notes.append(f"字符串抽取失败：{e}")
+                self._count_files(res, dst)
+                return res
+
+        # ---- 5) 兜底：分段 + 画像 ----
+        res["method"] = "分段 + 画像（该类型没有容器结构可拆）"
+        notes.append("文件本身不是容器，已产出：分段图 / 熵分布 / 字符串画像；"
+                     "若是密文，接「一键解密」")
+        rep = dst / "拆解报告.md"
+        lines = ["# 拆解报告", "", f"- 文件：{p}", f"- 识别：{kind.brief()}",
+                 f"- 熵：{kind.entropy:.2f}", ""]
+        try:
+            sm = segmod.analyze(p)
+            lines.append("## 分段")
+            lines.append(f"- {sm.brief()}")
+            if sm.split.found:
+                lines.append(f"- 明暗分界：{sm.split.brief()}")
+        except Exception as e:                                      # noqa: BLE001
+            lines.append(f"分段失败：{e}")
+        rep.write_text("\n".join(lines), encoding="utf-8")
+        res["files"] = 1
+        notes.append(f"报告 → {rep}")
+        return res
+
+    def _tool(self, tid: str):
+        """取注册表工具，不可用返回 None。"""
+        try:
+            t = registry().get(tid)
+            return t if (t and t.available) else None
+        except Exception:                                           # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _seven_cmd(seven) -> list[str] | None:
+        """7-Zip 命令：优先完整版 7z.exe（支持 zip/rar/iso/chm/ole 等），
+        7zr.exe 只认 .7z 格式，拿不到完整版时返回 None。"""
+        if not seven or not getattr(seven, "available", False):
+            return None
+        exe = Path(seven.path or "")
+        if exe.name.lower() == "7z.exe":
+            return list(seven.cmd)
+        full = exe.with_name("7z.exe")
+        if full.exists():
+            return [str(full)] + list(seven.cmd)[1:]
+        # 系统 PATH 与常见安装位置找完整版
+        from shutil import which
+        found = which("7z") or which("7za")
+        if not found:
+            for cand in (r"C:\Program Files\7-Zip\7z.exe",
+                         r"C:\Program Files (x86)\7-Zip\7z.exe"):
+                if Path(cand).exists():
+                    found = cand
+                    break
+        if found:
+            return [found] + list(seven.cmd)[1:]
+        return None
+
+    @staticmethod
+    def _count_files(res: dict, dst: Path) -> None:
+        res["files"] = sum(1 for f in dst.rglob("*") if f.is_file())
+
     def segments(self, target: str | Path) -> segmod.SegmentMap:
         """
         分段：找出「前面明文 / 后面密文」的分界点，并尝试从明文头里捞密钥。

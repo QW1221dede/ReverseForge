@@ -872,6 +872,22 @@ reverseforge/
 `logs/`（逐次命令日志）、`scripts/`（自己的脚本）、`tool_versions.json`（版本缓存）。
 
 
+### 通用拆解覆盖清单（v11）
+
+「一键拆包」对**任何文件**自动选最合适的拆法，不再只认 APK：
+
+| 类型 | 拆法 |
+|---|---|
+| APK / AAB / APKS / XAPK | apktool + jadx 全流程 |
+| ZIP 家族：jar / docx / xlsx / pptx / ipa / appx / msix / crx / xpi / epub / nupkg / vsix / aar / war / ear / odt / ods / odp / whl / sketch | Python 原生解压（自动修复中文文件名乱码） |
+| tar / tar.gz / tar.bz2 / tar.xz / 裸 gzip·bz2·xz | Python tarfile（零外部依赖） |
+| RAR / 7z / ISO / DMG / MSI / CAB / WIM / VHD / VHDX / RPM / SquashFS / AR | 7-Zip 完整版 |
+| 旧版 Office（doc/xls/ppt）/ Outlook 邮件 msg / Access mdb / CHM 帮助 | 7-Zip 抽内嵌流与附件 |
+| EXE / DLL（PE） | 7-Zip 抽资源节 + 字符串清单 |
+| 其它（ELF / 脚本 / 密文 / SQLite / PCAP / LNK…） | 分段 + 熵 + 画像报告 |
+
+识别端同步新增：zstd / LZ4 / LZIP / LZOP / compress.Z / CAB / WIM / TAR / VHD / VHDX / DMG / ISO9660 / CHM / OLE 细分（doc/xls/ppt/msg/mdb/msi/one）/ SWF / PCAP / PCAPNG / BT 种子 / LNK 快捷方式 / 字体 / pyc / EPUB 等三十余种。
+
 ## 反馈与意见渠道
 
 - **邮箱**：m358685@163.com

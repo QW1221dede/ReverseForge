@@ -81,6 +81,31 @@ _MAGIC: list[tuple[bytes, str, str, str]] = [
     (b"\xfd7zXZ\x00", "xz", CAT_ARCHIVE, "xz"),
     (b"\x28\xb5\x2f\xfd", "zstd", CAT_ARCHIVE, "zstd"),
     (b"\x5d\x00\x00", "LZMA 裸流", CAT_ARCHIVE, "lzma"),
+    (b"\x04\x22\x4d\x18", "LZ4 压缩", CAT_ARCHIVE, "lz4"),
+    (b"LZIP", "LZIP 压缩", CAT_ARCHIVE, "lzip"),
+    (b" LZ", "LZOP 压缩", CAT_ARCHIVE, "lzop"),
+    (b"\x1f\x9d\x90", "compress(.Z) 压缩", CAT_ARCHIVE, "z"),
+    (b"MSCF\x00\x00\x00\x00", "CAB 微软压缩包", CAT_ARCHIVE, "cab"),
+    (b"WLPWM", "WIM 微软镜像", CAT_ARCHIVE, "wim"),
+    (b"!<arch>\n", "AR 归档（.deb/.a/.whl 旧式）", CAT_ARCHIVE, "ar"),
+    (b"\xed\xab\xee\xdb", "RPM 软件包", CAT_ARCHIVE, "rpm"),
+    (b"hsqs", "SquashFS 只读镜像", CAT_ARCHIVE, "squashfs"),
+    (b"ustar", "TAR 归档", CAT_ARCHIVE, "tar"),
+    (b"connectixcwd", "VHD 虚拟磁盘", CAT_ARCHIVE, "vhd"),
+    (b"vhdxfile", "VHDX 虚拟磁盘", CAT_ARCHIVE, "vhdx"),
+    (b"koly", "DMG 苹果磁盘镜像", CAT_ARCHIVE, "dmg"),
+    (b"ITSF", "CHM 编译帮助文件", CAT_DOC, "chm"),
+    (b"BTd", "BT 种子文件", CAT_DATA, "torrent"),
+    (b"\xd4\xc3\xb2\xa1", "PCAP 抓包", CAT_DATA, "pcap"),
+    (b"\x0a\x0d\x0d\x0a", "PCAPNG 抓包", CAT_DATA, "pcapng"),
+    (b"FWS", "SWF Flash（未压缩）", CAT_MEDIA, "swf"),
+    (b"CWS", "SWF Flash（zlib 压缩）", CAT_MEDIA, "swf"),
+    (b"ZWS", "SWF Flash（lzma 压缩）", CAT_MEDIA, "swf"),
+    (b"\x4c\x00\x00\x00\x01\x14\x02\x00", "Windows 快捷方式 LNK", CAT_DATA, "lnk"),
+    (b"wOFF", "WOFF 网页字体", CAT_MEDIA, "woff"),
+    (b"wOF2", "WOFF2 网页字体", CAT_MEDIA, "woff2"),
+    (b"\x00\x01\x00\x00\x00", "TTF 字体", CAT_MEDIA, "ttf"),
+    (b"OTTO", "OTF 字体", CAT_MEDIA, "otf"),
 
     (b"\x7fELF", "ELF 可执行 / 动态库", CAT_BINARY, "elf"),
     (b"MZ", "PE（Windows 可执行）", CAT_BINARY, "pe"),
@@ -152,6 +177,54 @@ _ROUTE: dict[str, list[str]] = {
     "dex": ["dex", "strings", "patch_scan"],
     "apk": ["apk_info", "apk_unpack", "patch_scan"],
     "zip": ["unpack", "zip_password", "identify"],
+    "rar": ["unpack", "identify"],
+    "7z": ["unpack", "identify"],
+    "tar": ["unpack", "identify"],
+    "cab": ["unpack", "identify"],
+    "wim": ["unpack", "identify"],
+    "iso": ["unpack", "identify"],
+    "dmg": ["unpack", "identify"],
+    "vhd": ["unpack", "identify"],
+    "vhdx": ["unpack", "identify"],
+    "squashfs": ["unpack", "identify"],
+    "gzip": ["unpack", "identify"],
+    "bzip2": ["unpack", "identify"],
+    "xz": ["unpack", "identify"],
+    "zstd": ["unpack", "identify"],
+    "lzma": ["unpack", "identify"],
+    "lz4": ["unpack", "identify"],
+    "lzip": ["unpack", "identify"],
+    "lzop": ["unpack", "identify"],
+    "z": ["unpack", "identify"],
+    "ar": ["unpack", "identify"],
+    "rpm": ["unpack", "identify"],
+    "ole": ["unpack", "strings"],
+    "doc": ["unpack", "strings"],
+    "xls": ["unpack", "strings"],
+    "ppt": ["unpack", "strings"],
+    "msg": ["unpack", "strings"],
+    "mdb": ["unpack", "strings"],
+    "msi": ["unpack", "identify"],
+    "one": ["unpack", "strings"],
+    "chm": ["unpack", "strings"],
+    "sqlite": ["strings"],
+    "epub": ["unpack"],
+    "ipa": ["unpack"],
+    "appx": ["unpack"],
+    "msix": ["unpack"],
+    "crx": ["unpack"],
+    "xpi": ["unpack"],
+    "nupkg": ["unpack"],
+    "vsix": ["unpack"],
+    "aar": ["unpack"],
+    "war": ["unpack"],
+    "ear": ["unpack"],
+    "odt": ["unpack"],
+    "ods": ["unpack"],
+    "odp": ["unpack"],
+    "docx": ["unpack"],
+    "xlsx": ["unpack"],
+    "pptx": ["unpack"],
     "py": ["authscan", "annotate"],
     "js": ["authscan", "annotate"],
     "lua": ["authscan", "strings"],
@@ -496,8 +569,52 @@ def sniff(path: str | Path, sample: int = 8192) -> FileKind:
             k.real, k.lang = (lang or "sh"), lang
             k.label = f"{_lang_cn(lang) or 'Shell'} 脚本"
             k.confidence = 95
+        elif real == "ole":
+            # OLE 复合文档细分：doc/xls/ppt/msg/mdb/one/msi
+            ext = p.suffix.lower()
+            sub = {".doc": ("doc", "Word 文档（旧版 OLE）"),
+                   ".xls": ("xls", "Excel 表格（旧版 OLE）"),
+                   ".ppt": ("ppt", "PowerPoint（旧版 OLE）"),
+                   ".msg": ("msg", "Outlook 邮件（OLE，附件可抽）"),
+                   ".mdb": ("mdb", "Access 数据库（OLE）"),
+                   ".msi": ("msi", "Windows 安装包（OLE）"),
+                   ".one": ("one", "OneNote 笔记（OLE）")}.get(
+                ext, ("ole", "OLE 复合文档（旧 Office / MSI）"))
+            k.real, k.label = sub
+            k.category = CAT_DOC
+            k.confidence = 93
+            k.notes.append("OLE 是容器：7-Zip 完整版可直接抽出内嵌流/附件")
         else:
             k.confidence = 95
+
+        # ---- 无魔数命中的常见容器兜底 ----
+        if k.real == "unknown" and len(data) >= 262:
+            # tar：偏移 257 处是 ustar
+            if data[257:262] == b"ustar":
+                k.real, k.category = "tar", CAT_ARCHIVE
+                k.label = "TAR 归档（老格式无 ustar 版本号）"
+                k.confidence = 90
+            # ISO9660：偏移 0x8001 是 CD001
+            elif p.stat().st_size > 0x8801:
+                try:
+                    with p.open("rb") as _f:
+                        _f.seek(0x8001)
+                        if _f.read(5) == b"CD001":
+                            k.real, k.category = "iso", CAT_ARCHIVE
+                            k.label = "ISO 光盘镜像"
+                            k.confidence = 95
+                except OSError:
+                    pass
+        # pyc：任意 4 字节魔数 + \r\n 固定在 2:4
+        if k.real == "unknown" and k.ext == ".pyc" and len(data) >= 16 \
+                and data[2:4] == b"\r\n":
+            k.real, k.category = "pyc", CAT_SCRIPT
+            k.label = "Python 字节码（.pyc）"
+            k.confidence = 85
+        if k.real == "unknown" and k.ext == ".url" and k.printable > 0.5:
+            k.real, k.category = "url", CAT_DATA
+            k.label = "URL 快捷方式"
+            k.confidence = 80
 
         # 补充：PE/ELF 的扩展名一致性（伪装提醒）
         if k.ext and k.real in ("pe", "elf") and _ext_mismatch(k.ext, k.real):
@@ -602,6 +719,29 @@ def _zip_flavor(p: Path, head: bytes) -> tuple[str, str, str] | None:
             return ("apk", "APK 安装包", CAT_ANDROID)
         if p.suffix.lower() == ".jar":
             return ("jar", "JAR 包", CAT_JAVA)
+        # 一切"其实是 ZIP"的现代格式
+        _zipish = {
+            ".ipa": ("ipa", "iOS 安装包（实为 ZIP）", CAT_ANDROID),
+            ".appx": ("appx", "Windows 应用包（实为 ZIP）", CAT_ARCHIVE),
+            ".msix": ("msix", "Windows 应用包（实为 ZIP）", CAT_ARCHIVE),
+            ".crx": ("crx", "浏览器扩展（实为 ZIP）", CAT_ARCHIVE),
+            ".xpi": ("xpi", "Firefox 扩展（实为 ZIP）", CAT_ARCHIVE),
+            ".epub": ("epub", "EPUB 电子书（实为 ZIP）", CAT_DOC),
+            ".nupkg": ("nupkg", "NuGet 包（实为 ZIP）", CAT_ARCHIVE),
+            ".vsix": ("vsix", "VS Code 扩展（实为 ZIP）", CAT_ARCHIVE),
+            ".aar": ("aar", "Android 库包（实为 ZIP）", CAT_JAVA),
+            ".war": ("war", "Java Web 包（实为 ZIP）", CAT_JAVA),
+            ".ear": ("ear", "Java 企业包（实为 ZIP）", CAT_JAVA),
+            ".odt": ("odt", "OpenDocument 文档（实为 ZIP）", CAT_DOC),
+            ".ods": ("ods", "OpenDocument 表格（实为 ZIP）", CAT_DOC),
+            ".odp": ("odp", "OpenDocument 演示（实为 ZIP）", CAT_DOC),
+            ".sketch": ("sketch", "Sketch 设计稿（实为 ZIP）", CAT_MEDIA),
+            ".apks": ("apk", "APK 分包集合（实为 ZIP）", CAT_ANDROID),
+            ".xapk": ("apk", "XAPK 分发包（实为 ZIP）", CAT_ANDROID),
+        }
+        hit = _zipish.get(p.suffix.lower())
+        if hit:
+            return hit
         with p.open("rb") as f:
             # 只读中央目录尾部找特征文件名，避免全量解压
             f.seek(max(0, p.stat().st_size - 65536))
