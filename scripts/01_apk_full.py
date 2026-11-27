@@ -19,6 +19,18 @@ target = apk
 if not target or not os.path.exists(target):
     raise RuntimeError(f"APK 不存在：{target}")
 
+# 非 APK 文件自动分流：本页五阶段全是 APK 专属（smali/重签/验签），
+# 硬跑必然全崩 —— 转投通用拆解，产出一样落进产物目录
+_kind = rf.file_type(target)
+if _kind.real != "apk":
+    rf.log(f"- 识别为 {_kind.label}，不是 APK → 自动转「通用拆解」")
+    _r = rf.unpack_any(target)
+    rf.log(f"- ✓ {_r['method']}（{_r['files']} 个文件）")
+    for _n in _r["notes"][:3]:
+        rf.log(f"    · {_n}")
+    rf.log("- 拆包产物见上方目录；dex 可拖回本页继续反编译，密文接「一键解密」")
+    raise SystemExit(0)
+
 # ── 1. 静态画像（不调外部工具，秒出）─────────────────────────────
 rf.note("阶段 1/5 · 静态画像")
 info = rf.apk_info(target)

@@ -74,6 +74,18 @@ def put(s=""):
 def do_apk(t: Path) -> bool:
     global final_apk, desktop_apk
     rf.step("① 准备解包目录", 5)
+    # 非 APK/DEX 的文件没有 smali 可改 —— 明确指路，不糊红字
+    if t.is_file():
+        _kind = rf.file_type(t)
+        if _kind.real not in ("apk", "dex", "cdex", "jar"):
+            put(f"- 识别为 {_kind.label}：删验证链路只对 APK/DEX 有意义")
+            put("- 该文件已自动走一遍通用拆解，内嵌对象在 unpack/carved/ 里；"
+                "若是密文接「一键解密」页")
+            _r = rf.unpack_any(t, out=rf.sub("unpack"))
+            put(f"- ✓ {_r['method']}（{_r['files']} 个文件）")
+            for _n in _r["notes"][:3]:
+                put(f"    · {_n}")
+            return False
     if t.is_dir() or (t.suffix.lower() in (".smali",) ):
         root = t
         put("- 直接用已有解包目录，跳过解包")

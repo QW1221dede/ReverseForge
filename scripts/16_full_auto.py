@@ -53,6 +53,8 @@ lines = ["# 全自动化报告", "",
 gate = {"结构": "未做", "签名": "未做", "回读": "未做", "运行": "未验证（无设备/非 APK）"}
 desktop_apk = None
 final_apk = None
+_unpack_result = None
+_nonapk = False
 
 
 def put(s=""):
@@ -68,23 +70,111 @@ def do_unpack() -> Path:
         put("- 已是解包目录，跳过拆包")
         return target
     rf.step("① 一键拆包", 8)
-    # 非 APK 容器（zip/rar/iso/文档…）自动切通用拆解
+    # 非 APK 容器（zip/rar/iso/文档/加密脚本/固件…）自动切通用拆解，
+    # 后续解密/删验证/打包照样跑（见 do_decrypt_any / do_auth_any / do_pack_any）
     kind = rf.file_type(target)
     if kind.real != "apk":
-        put(f"- 识别为 {kind.label}，不是 APK → 走通用拆解")
+        put(f"- 识别为 {kind.label}，不是 APK → 通用拆解 + 通用解密/删验证链路")
         r = rf.unpack_any(target, out=out / "unpack")
         put(f"- ✓ {r['method']}（{r['files']} 个文件）")
         for n in r["notes"][:3]:
             put(f"    · {n}")
-        if stage == "unpack":
-            return target          # 非 APK 没有后续补丁/打包流程
-        raise RuntimeError("该文件不是 APK，无法走「删验证 + 打包」流程；"
-                           "用「通用拆解（任何文件）」脚本或单独跑拆包即可")
+        global _unpack_result, _nonapk
+        _unpack_result = r
+        _nonapk = True
+        return out / "unpack"
     un = rf.apk_unpack(target, out=out / "unpack", apktool=True, jadx=False)
     if not un.apktool_dir:
         raise RuntimeError("拆包失败：" + "；".join(un.errors[:3]))
     put(f"- ✓ 解包完成：`{un.apktool_dir}`")
     return Path(un.apktool_dir)
+
+
+# ---------------------------------------------------------------------------
+# ①b 通用链路（非 APK 全类型适用）
+# ---------------------------------------------------------------------------
+def _iter_targets(root: Path, limit: int = 80, max_mb: float = 64) -> list[Path]:
+    """挑出要试解/扫描的候选文件：解包目录里的 + 原文件本身（单文件直拖场景）。"""
+    files: list[Path] = []
+    if target.is_file():
+        files.append(target)
+    try:
+        files.extend(p for p in sorted(root.rglob("*"))
+                     if p.is_file() and not p.name.startswith("."))
+    except OSError:
+        pass
+    out_l: list[Path] = []
+    for p in files:
+        try:
+            if p.stat().st_size <= max_mb * (1 << 20):
+                out_l.append(p)
+        except OSError:
+            pass
+        if len(out_l) >= limit:
+            break
+    return out_l
+
+
+def do_decrypt_any(root: Path) -> int:
+    """② 通用解密：解包产物里每个文件全算法撞一遍，命中的落盘。"""
+    rf.step("② 一键解密（通用）", 30)
+    cands = _iter_targets(root)
+    keys = rf.keys_any(root, limit=80)
+    put(f"- 候选文件 {len(cands)} 个，候选密钥 {len(keys)} 条")
+    saved = 0
+    dec_dir = out / "已解密"
+    for i, f in enumerate(cands, 1):
+        rf.step(f"试解 {f.name}", int(30 + 20 * i / max(1, len(cands))))
+        try:
+            rep = rf.decrypt_auto(f, keys=keys, deep=False, top=6)
+            if rep.hits:
+                saved += len(rf.decrypt_save(rep, dec_dir, limit=2))
+        except Exception as e:                                  # noqa: BLE001
+            put(f"    ! {f.name}：{e}")
+    put(f"- ✓ 解密命中落盘 {saved} 份 → 已解密/" if saved
+        else "- 解密未命中（可能不是常规算法加密，或本身是明文）")
+    return saved
+
+
+def do_auth_any(root: Path) -> int:
+    """③ 通用删验证：脚本源码文本替换（带备份可回滚），PE/ELF 给定位清单。"""
+    rf.step("③ 一键删前置验证（通用）", 55)
+    changed = 0
+    for scan_t in ([target] if target.is_file() else []) + [root]:
+        try:
+            rep = rf.auth_scan(scan_t, min_confidence=int(min_conf))
+        except Exception as e:                                  # noqa: BLE001
+            put(f"    ! 扫描 {scan_t} 失败：{e}")
+            continue
+        if not rep.points:
+            continue
+        put(f"- {len(rep.points)} 个校验点（{scan_t.name or '解包目录'}），"
+            "自动应用恒真改法，先备份可回滚")
+        try:
+            res = rf.auth_apply(rep, dry_run=False, backup_dir=out / "备份")
+            changed += len(res.changed or [])
+        except Exception as e:                                  # noqa: BLE001
+            put(f"    ! 应用失败：{e}")
+    if changed:
+        put(f"- ✓ 已改 {changed} 处（备份在 备份/，可回滚）")
+    else:
+        put("- 没有能自动改的校验点；PE/EXE 类的偏移定位见上方清单，"
+            "用 Ghidra 改跳转")
+    return changed
+
+
+def do_pack_any(root: Path) -> Path:
+    """④ 通用打包：把处理后的解包目录 + 解密成果打成成品 zip（丢桌面）。"""
+    rf.step("④ 打包成品（通用）", 78)
+    import zipfile as _zf
+    zpath = out / f"{target.stem}_已处理.zip"
+    with _zf.ZipFile(zpath, "w", _zf.ZIP_DEFLATED) as z:
+        for p in sorted(out.rglob("*")):
+            if (p.is_file() and p != zpath and p != target
+                    and "备份" not in p.parts):
+                z.write(p, p.relative_to(out))
+    put(f"- ✓ 成品包：{zpath.name}（{zpath.stat().st_size // 1024} KB）")
+    return zpath
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +313,32 @@ def do_desktop(apk: Path) -> None:
 # 分派执行
 # ---------------------------------------------------------------------------
 root = do_unpack()
-if stage == "unpack":
+if _nonapk:
+    # 通用链路：所有类型都能走完 解密 → 删验证 → 打包
+    if stage == "unpack":
+        put("- 按要求只执行到拆包")
+    else:
+        do_decrypt_any(root)
+        if stage not in ("decrypt",):
+            do_auth_any(root)
+            if stage != "patch":
+                zpath = do_pack_any(root)
+                gate["结构"] = "已拆解"
+                gate["签名"] = "非 APK，不适用"
+                gate["回读"] = "非 APK，不适用"
+                if to_desktop and zpath.exists():
+                    try:
+                        from rf.tools.desktop import drop_to_desktop
+                        dp, msg = drop_to_desktop(zpath, name=target.stem,
+                                                  tag="已处理")
+                        put(f"- ✓ {msg}")
+                    except Exception as e:                      # noqa: BLE001
+                        put(f"- 放桌面失败（成品仍在产物目录）：{e}")
+            else:
+                put("- 按要求只执行到删验证（没打包）")
+        else:
+            put("- 按要求只执行到解密")
+elif stage == "unpack":
     put("- 按要求只执行到拆包")
 else:
     do_decrypt(root)
@@ -243,9 +358,12 @@ if desktop_apk:
     put(f"- 桌面成品：`{desktop_apk}`　← 直接传手机安装")
 if final_apk:
     put(f"- 产物成品：`{final_apk}`")
-put(f"- smali 备份：`{out / '备份'}`（改坏了可回滚）")
-put("- 带服务器说明：本地补丁让「服务器拒绝/复核失效」不再影响运行；"
-    "规则包内嵌加密文件已尝试解密落盘（见「已解密」目录）。")
+if _nonapk:
+    put("- 非 APK 通用链路：拆解 → 解密 → 删验证 → 成品包（备份与已解密都在产物目录）")
+else:
+    put(f"- smali 备份：`{out / '备份'}`（改坏了可回滚）")
+    put("- 带服务器说明：本地补丁让「服务器拒绝/复核失效」不再影响运行；"
+        "规则包内嵌加密文件已尝试解密落盘（见「已解密」目录）。")
 
 md = out / "全自动化报告.md"
 md.write_text("\n".join(lines), encoding="utf-8")

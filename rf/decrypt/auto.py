@@ -291,6 +291,8 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     for off in body_offsets[:3]:
         chunk = data[off:off + 256 * 1024] if off else sample
         for k, sc, dec in C.xor_single_bruteforce(chunk, top=4):
+            if k == 0:                      # XOR 0x00 等于没解，纯噪音
+                continue
             add(f"单字节 XOR 0x{k:02X}", dec, off, key=f"0x{k:02X}")
 
     # ---- 2.5) 已知明文攻击（确定性，比频率分析可靠）----
