@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..analysis import garble, segments
+from ..analysis import selfextract as SE
 from . import ciphers as C
 from . import crib as CR
 from . import keys as K
@@ -336,6 +337,42 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             solved = True
         hits.append(Hit(method=method, offset=offset, score=sc, out=out,
                         preview=_preview(out), key=key, note=note))
+
+    # ---- 0) 自解压 / 多层封装快速通道 ----
+    #   *.sh（makeself：skip=N + tail | gzip -cd）、拼接压缩包、UPX 壳、
+    #   多个 ELF 拼在一个文件里……这些都不是加密，照着容器协议拆就行。
+    #   必须在昂贵试解前处理，否则几十秒白跑，最后还给出"解不出来"的错误结论。
+    _body0 = data[seg.split.head_end:] if (seg.split.found and seg.split.head_end > 0) else data
+    _magic = _body0[:4]
+    _compress_magic = (_magic.startswith(b"\x1f\x8b") or _magic.startswith(b"PK\x03\x04")
+                       or _magic.startswith(b"7z\xbc") or _magic.startswith(b"Rar!")
+                       or _magic.startswith(b"BZh") or _magic.startswith(b"\xfd7z"))
+    _makeself = SE.parse_makeself(data[:65536]) is not None
+    if _compress_magic or _makeself:
+        try:
+            _target = data if _makeself else _body0
+            _unp = SE.deep_unpack(_target, Path(str(target)).stem or "payload")
+            for a in _unp.artifacts:
+                if a.kind in ("makeself",):
+                    sc = 60
+                elif a.kind == "gzip":
+                    sc = 72
+                elif a.kind == "upx":
+                    sc = 100
+                else:
+                    sc = 98
+                label = {"makeself": "自解压脚本负载", "gzip": "压缩流解包",
+                         "upx": "UPX 脱壳", "elf": "ELF 提取"}.get(a.kind, a.kind)
+                add(f"{label} · {a.note[:46]}" if a.note else label, a.data, 0,
+                    force_score=sc, note=a.note)
+            rep.notes.extend(_unp.notes)
+            if _unp.artifacts:
+                hits.sort(key=lambda h: (h.score, len(h.out)), reverse=True)
+                rep.hits = hits[:top]
+                rep.elapsed = time.time() - t0
+                return rep            # 容器已拆开，不必再撞 96 种算法
+        except Exception as e:                                  # noqa: BLE001
+            rep.notes.append(f"多层封装拆解失败：{e}")
 
     # 打分只看样本，命中后全文重解
     sample = data[:256 * 1024]

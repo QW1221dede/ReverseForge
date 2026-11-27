@@ -459,23 +459,34 @@ def find_split(data: bytes, window: int = 4096, step: int | None = None,
             sp.note = f"文件头是完整 {_name} 容器，不做明文头+密文切分"
             return sp
 
-    # 优先：中文明文头 + 文本形态密文（base64/hex/引号串）。
-    # 老路径 _prefix_text_end 遇到中文会在第一个非 ASCII 字节截断，
-    # 且 _snap_boundary 不认"可打印的密文"，必须让行级探测先上。
-    # 行级探测给的边界已是行首（精确到字节），无需再吸附；
-    # 而且密文短于 min_tail 时也允许（小配置文件加密后就百来字节）。
+    # 中文明文头 + 文本形态密文（base64/hex/引号串）走行级探测。
+    # 但 _prefix_text_end 若落在标准魔数上（gzip 1f8b / PK / ELF），
+    # 那是字节精确的容器起点，比行级判据可信 —— 必须优先。
+    # 真实翻车：makeself 自解压脚本 skip=50，ASCII 前缀精确落在 978(gzip)，
+    # 行级探测却因一行注释被 garble 误判在 360 截断，边界错 618 字节。
     line_end, line_note = _line_text_end(data)
     if line_end >= min_head and line_end < n:
+        ascii_end, ascii_exact = _prefix_text_end(data)
+        chosen, chosen_note = line_end, line_note
+        if ascii_exact and ascii_end > line_end:
+            tail_magic = data[ascii_end:ascii_end + 4]
+            _magics = ((b"\x1f\x8b", "gzip"), (b"PK", "ZIP"),
+                       (b"\x7fELF", "ELF"), (b"Rar!", "RAR"),
+                       (b"7z\xbc", "7z"), (b"BZh", "bzip2"), (b"\xfd7z", "xz"))
+            for magic, name in _magics:
+                if tail_magic.startswith(magic):
+                    chosen, chosen_note = ascii_end, f"ASCII 精确边界落在 {name} 魔数（{ascii_end}B）"
+                    break
         sp.found = True
-        sp.head_end = line_end
-        sp.head_len = line_end
-        sp.tail_len = n - line_end
-        sp.tail_entropy = shannon(data[line_end:line_end + 131072])
+        sp.head_end = chosen
+        sp.head_len = chosen
+        sp.tail_len = n - chosen
+        sp.tail_entropy = shannon(data[chosen:chosen + 131072])
         sp.head_kind = S_TEXT
-        sp.head_preview = data[:line_end][:400].decode("utf-8", "replace")
-        sp.head_keys = head_keys(data[:line_end])
-        sp.confidence = 88
-        sp.note = line_note
+        sp.head_preview = data[:chosen][:400].decode("utf-8", "replace")
+        sp.head_keys = head_keys(data[:chosen])
+        sp.confidence = 90
+        sp.note = chosen_note
         return sp
 
     head_end, exact = _prefix_text_end(data)

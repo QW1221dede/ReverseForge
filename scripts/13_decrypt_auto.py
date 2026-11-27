@@ -71,6 +71,9 @@ for i, f in enumerate(files):
         lines.append(f"- 分段：明文头 {rep.split.head_len}B + 密文体 {rep.split.tail_len}B"
                      f"（{rep.split.note}）")
         lines.append("- 已对密文体单独递归试解，避免明文头稀释打分")
+    if rep.notes:
+        for n in rep.notes[:8]:
+            lines.append(f"- {n}")
     if rep.hits:
         ok_count += 1
         lines.append("")
@@ -85,6 +88,8 @@ for i, f in enumerate(files):
     else:
         lines.append("")
         lines.append("没解出来。下一步：")
+        lines.append("- 先确认它**不是容器**：`*.sh` 自解压、gzip/ZIP 拼接、UPX 壳、"
+                     "多个 ELF 拼在一起——这些是包装不是加密，本工具会自动拆")
         lines.append("- 先跑 12_any_file.py 看是不是「明文头+密文」，"
                      "把明文头里的 key/iv 填到本脚本的 keys 参数")
         lines.append("- 从程序里找解密函数：`rf.auth_scan(程序目录)` "

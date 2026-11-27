@@ -34,7 +34,7 @@ from pathlib import Path
 
 APP_NAME = "ReverseForge"
 APP_CN = "逆锻台"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 def _user_root() -> Path:
