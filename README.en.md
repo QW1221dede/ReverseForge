@@ -18,4 +18,4 @@ analyze auth-checkpoints, auto-decrypt, patch, rebuild & re-sign — all offline
 Any derivative (including network services) must stay AGPL-3.0 open-source
 with these terms. See [LICENSE](LICENSE).
 
-**Donation (optional)**: if this tool helps you, you can buy the author a coffee — see the 打赏 section in [README.md](README.md) (contact: m358685@163.com). Donations are voluntary and unlock nothing; every feature stays free and open-source.
+**Donation (optional)**: if this tool helps you, you can email the author at m358685@163.com to arrange support. Donations are voluntary and unlock nothing; every feature stays free and open-source.
