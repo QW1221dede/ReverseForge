@@ -4,6 +4,7 @@
 # @desc 解密出来的片段自动串成线索 → 判定协议 → 生成假请求/假响应/发包时序
 # @param target 文件或解包目录 [file]
 # @param to_desktop 报告复制到桌面 [bool:false]
+# @param send 真发包并收割签名（默认只预览） [bool:false]
 
 """
 用法：
@@ -26,7 +27,8 @@ if not target.exists():
     raise RuntimeError(f"路径不存在：{target}")
 
 rf.step("假包管线", 8)
-result = rf.fakepacket_build(target)
+result = rf.fakepacket_build(target, send=bool(send),
+                             dry_run=not bool(send))
 
 protos = result["protocols"]
 packs = result["packets"]
@@ -51,6 +53,15 @@ rf.log(f"✓ 报告：{out / '假包方案报告.md'}")
 rf.log("  报告第五节是「明文线索图」：二进制里藏的中文/URL/字段全列出来了，"
        "不用自己拿十六进制工具翻。")
 rf.log("  发包脚本默认 DRY=1（只打印不发送），确认字段后再去掉。")
+
+rp = result.get("replay")
+if rp is not None:
+    rf.log("── 签名收割 → 真签名重放 ──")
+    rf.log(rp.table())
+    if send and rp.signed:
+        rf.log("✓ 已换上真签名：详细资料/已签名请求包.json")
+    elif not send:
+        rf.log("  想真发包：勾选「真发包并收割签名」再跑一次。")
 
 if to_desktop:
     from rf.tools.desktop import drop_to_desktop

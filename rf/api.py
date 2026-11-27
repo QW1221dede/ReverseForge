@@ -61,6 +61,8 @@ from .decrypt import keys as deckeys
 from .fakepacket import extract as fp_extract, infer as fp_infer, build as fp_build
 from .fakepacket import render_script as fp_script, report_md as fp_report
 from .fakepacket import plaintext_map as fp_plaintext
+from .fakepacket import replay as fp_replay, render_replay_script as fp_replay_script
+from .fakepacket import capture_signatures as fp_capture
 from .patch import checkpoints as cpmod
 from .patch import engine as patchmod
 from .patch import netcheck as netmod
@@ -1262,7 +1264,8 @@ class Api:
         return files
 
     # =================== 假包（线索 → 协议 → 发包方案） ===================
-    def fakepacket_build(self, target: str | Path) -> dict:
+    def fakepacket_build(self, target: str | Path, *, send: bool = False,
+                         dry_run: bool = True) -> dict:
         """
         和 decrypt_auto 同一套流程，只是产物从「明文」变成「假包」：
 
@@ -1279,13 +1282,43 @@ class Api:
         packs = fp_build(chain, protos)
         script = fp_script(protos[0], packs) if protos else "# 没判定出协议，没有发包脚本"
         rep = fp_report(chain, protos, packs, str(p))
-        # 解出来的明文片段 → 可读线索图（用户口径「后面一大串加密没明文展现」）
         pmap = None
         try:
             pmap = fp_plaintext(p)
             rep += "\n\n## 五、明文线索图（二进制里藏的可读片段）\n\n" + pmap.markdown()
         except Exception as e:                              # noqa: BLE001
             rep += f"\n\n## 五、明文线索图\n\n抽取失败：{e}\n"
+
+        # ---- 签名收割闭环：发假包 → 抓真签名 → 回填 → 重放 ----
+        replay_rep = None
+        replay_script = ""
+        body = {}
+        extra_headers: dict[str, str] = {}
+        if protos:
+            import json as _json
+            import re as _re
+            reqpk = next((x for x in packs if x.kind == "request"), None)
+            if reqpk:
+                m = _re.search(r"(\{\n.*?\n\})", reqpk.content, _re.S)
+                if m:
+                    try:
+                        body = _json.loads(m.group(1))
+                    except ValueError:
+                        body = {}
+            try:
+                replay_rep = fp_replay(protos[0], body, dry_run=not send,
+                                           extra_headers=extra_headers or None)
+                replay_script = fp_replay_script(protos[0], body,
+                                                 headers=extra_headers)
+                rep += ("\n\n## 六、签名收割 → 真签名重放\n\n"
+                        + replay_rep.table())
+                if send and not dry_run and replay_rep.signed:
+                    self.log(f"✓ 收割到真签名 {len(replay_rep.harvested)} 个，已回填重放")
+                elif not send:
+                    self.log("  重放闭环：DRY 预览（未发包）；send=true 才会真发")
+            except Exception as e:                          # noqa: BLE001
+                rep += f"\n\n## 六、签名收割 → 真签名重放\n\n执行失败：{e}\n"
+                self.log(f"  重放闭环失败：{e}")
         self.log(chain.summary())
         if protos:
             self.log(f"判定：{protos[0].name}（置信 {protos[0].confidence}%）"
@@ -1294,7 +1327,9 @@ class Api:
         else:
             self.log("没判定出协议 —— 先跑解密把明文挖出来")
         return {"chain": chain, "protocols": protos, "packets": packs,
-                "report": rep, "script": script, "plaintext": pmap}
+                "report": rep, "script": script, "plaintext": pmap,
+                "replay": replay_rep, "replay_script": replay_script,
+                "body": body}
 
     def fakepacket_save(self, result: dict,
                         out_dir: str | Path | None = None) -> list[Path]:
@@ -1308,6 +1343,23 @@ class Api:
         sc = od / "发包脚本.py"
         sc.write_text(result.get("script", ""), encoding="utf-8")
         files.append(sc)
+        rp = result.get("replay")
+        if rp is not None:
+            rs = od / "签名收割重放.py"
+            rs.write_text(result.get("replay_script", ""), encoding="utf-8")
+            files.append(rs)
+            # 真签名已到手就落一份成品，可直接拿去发
+            if rp.signed:
+                import json as _j
+                sg = od / "已签名请求包.json"
+                sg.write_text(_j.dumps(rp.final_body, ensure_ascii=False,
+                                       indent=2), encoding="utf-8")
+                files.append(sg)
+                hd = od / "已签名请求头.json"
+                hd.write_text(_j.dumps(result.get("headers", {}),
+                                       ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+                files.append(hd)
         pmap = result.get("plaintext")
         if pmap is not None:
             try:
@@ -1320,6 +1372,51 @@ class Api:
             files.append(f)
         self.log(f"假包已落盘：{od}")
         return files
+
+    def fakepacket_capture(self, capture: str | Path, target: str | Path) -> dict:
+        """从手机抓包/日志里收割真签名，回填到假包，产出可直接发的已签名请求。
+
+        capture 可以是抓包文本、har/xlog 文件、或浏览器复制的 cURL。
+        """
+        p = self._need_path(target)
+        result = self.fakepacket_build(p)
+        protos = result.get("protocols", [])
+        if not protos:
+            raise RfError("没判定出协议，无法回填签名")
+        try:
+            blob = (Path(capture).read_bytes() if Path(capture).exists()
+                    else str(capture).encode("utf-8"))
+        except OSError as e:
+            raise RfError(f"读抓包失败：{e}") from e
+        sigs = fp_capture(blob)
+        body = dict(result.get("body") or {})
+        headers: dict[str, str] = {}
+        for h in sigs:
+            # HTTP 头来源的签名要放回 header，塞进 JSON body 服务器不认
+            if h.source in ("header", "capture-header", "log") and (
+                    h.field.lower().startswith("x-") or
+                    h.field.lower() in ("authorization", "cookie", "set-cookie")):
+                headers[h.field] = h.value
+            else:
+                body[h.field] = h.value
+        result["body"] = body
+        result["captured"] = sigs
+        result["headers"] = headers
+        # 让 fakepacket_save 据此落「已签名请求包.json」
+        if sigs:
+            from .fakepacket import ReplayReport
+            rr = ReplayReport(url=(protos[0].endpoint if protos else ""),
+                              harvested=sigs, final_body=body, ok=True,
+                              note="从抓包收割真签名并回填")
+            result["replay"] = rr
+            result["replay_script"] = fp_replay_script(protos[0], body,
+                                                       headers=headers)
+        result["report"] += ("\n\n## 七、从抓包收割的真签名\n\n"
+                             + ("\n".join(f"- {h.row()}" for h in sigs)
+                                if sigs else "没抓到签名字段")
+                             + "\n\n已回填到请求体，可用「已签名请求包.json」直接发包。\n")
+        self.log(f"从抓包收割 {len(sigs)} 个签名字段，已回填")
+        return result
 
     def keys_any(self, target: str | Path, limit: int = 120) -> list:
         """从文件/目录里翻候选密钥（明文头、源码常量、配置、长 hex）。"""

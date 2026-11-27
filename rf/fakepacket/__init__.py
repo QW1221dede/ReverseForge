@@ -34,6 +34,8 @@ from .protocol import Proto, infer, PROTOCOLS
 from .builder import Packet, build, render_script
 from .report import report_md
 from .plaintext import PlaintextMap, build as plaintext_map
+from .replay import (ReplayReport, Harvest, replay, render_replay_script,
+                     _extract_signatures, capture_signatures)
 
 __all__ = [
     "Clue", "ClueChain", "extract",
@@ -41,4 +43,6 @@ __all__ = [
     "Packet", "build", "render_script",
     "report_md",
     "PlaintextMap", "plaintext_map",
+    "ReplayReport", "Harvest", "replay", "render_replay_script",
+    "_extract_signatures", "capture_signatures",
 ]
