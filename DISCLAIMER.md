@@ -122,3 +122,26 @@ ReverseForge is a reverse-engineering and security-analysis platform intended **
 
 ---
 最后更新：2026-11-27（v10，AGPL-3.0 + 禁商用附加条款）
+
+
+---
+
+## English Summary / 英文摘要
+
+**What this tool is for**: ReverseForge is an educational & authorized-testing platform for
+reverse engineering and security analysis. It may only be used on software/files you own, or
+targets you are **explicitly authorized in writing** to test (pentest, code audit, forensics,
+CTF, academic research).
+
+**Strictly prohibited**: cracking or removing license/payment controls of commercial software,
+unauthorized access to accounts/data/communications, creating or spreading cheats/malware,
+infringing IP, trade secrets or personal information.
+
+**No warranty; you bear all liability.** The authors provide this tool AS IS, do not endorse any
+illegal use, and are not liable for any consequences of your use. Before use you must review the
+applicable laws of your jurisdiction — for the PRC these include Criminal Law Arts. 285/286/217/218,
+Copyright Law Arts. 24/53, Cybersecurity Law Art. 27, Anti-Unfair Competition Law Art. 12, and the
+Software Protection Regulations Art. 24 (see Section 5 above, authoritative Chinese text).
+
+**License**: GNU AGPL-3.0 **plus additional terms prohibiting any commercial use** (see LICENSE).
+By downloading or using this tool you declare your use is lawful and authorized.

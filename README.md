@@ -10,6 +10,26 @@
 > 破解、盗版、未授权获取他人数据、制作外挂或恶意软件 —— 一律禁止。
 > 完整条款见 [DISCLAIMER.md](DISCLAIMER.md)，下载即视为同意。
 
+---
+
+## English / 英文简介
+
+**ReverseForge** is a local-first reverse engineering & security analysis workbench for Windows.
+It wraps scattered CLI tools (jadx / apktool / rizin / Ghidra / 7-Zip / adb) into one GUI driven
+by **scripts** — one line like `rf.apk_unpack(path)` runs unpack + decompile, with annotated output.
+
+- **Auth-checkpoint scanning** along the Application/Activity startup chain: license keys, activation, signature & environment checks — with evidence, confidence, and "patch this line" suggestions.
+- **Rollbackable patching**: edit smali -> validate -> rebuild -> sign -> roundtrip verify; any failure reverts the whole batch.
+- **Not just APK**: EXE/DLL, native .so, scripts and data files can be identified, segmented and auto-decrypted (XOR/RC4/AES/TEA/XXTEA/OpenSSL Salted, known-plaintext attack).
+- **Full-auto pipeline** tab: unpack -> decrypt -> remove pre-run license checks -> rebuild & sign -> drop result to Desktop.
+- **42 code blocks + resident terminal + local HTTP API** for AI orchestration.
+
+> **English notice**: AV engines may flag it (PyInstaller + injection-style capabilities) — whitelist `%LOCALAPPDATA%\ReverseForge` first, see [SECURITY.md](SECURITY.md). Use **only** on software you own or are explicitly authorized to test; cracking, piracy and malware-making are strictly forbidden — see [DISCLAIMER.md](DISCLAIMER.md).
+
+**License: GNU AGPL-3.0 with additional terms — commercial use is prohibited.** Any derivative (including running it as a network service) must remain AGPL-3.0 open-source with these terms preserved.
+
+---
+
 桌面端逆向工作台。把散落的一堆命令行工具（jadx / apktool / rizin / Ghidra / 7-Zip / adb）
 收进一个界面，并用**脚本**驱动全部流程 —— 脚本里一行 `rf.apk_unpack(path)` 就能跑完
 解包 + 反编译，输出带中文注释的源码。
