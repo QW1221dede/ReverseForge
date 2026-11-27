@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..analysis import verify
+from . import guards
 
 # ---------------------------------------------------------------------------
 # 数据模型
@@ -92,6 +93,11 @@ class Checkpoint:
     calls: list[str] = field(default_factory=list)   # 调用的外部方法
     note: str = ""
     auto_safe: bool = False      # 首选建议是否适合无人值守自动应用
+    guard: bool = False          # 是否是"防改动/防调试/防环境"守卫
+    guard_kind: str = ""         # apk_sig / integrity / antidebug / antiinject …
+    guard_neutral: str = ""      # pass(要"通过") / false(要"未命中") / none
+    inline_guard: bool = False   # 守卫内联在生命周期方法里（不能整体清空）
+    indirect: bool = False       # 通过反射/字符串点名被调用（调用图断链）
 
     @property
     def best(self) -> Suggestion | None:
@@ -111,6 +117,9 @@ class Checkpoint:
             "pre_run": self.pre_run, "evidence": self.evidence,
             "chain": self.chain, "returns": self.returns,
             "strings": self.strings[:6], "note": self.note,
+            "guard": self.guard, "guard_kind": self.guard_kind,
+            "guard_neutral": self.guard_neutral,
+            "inline_guard": self.inline_guard, "indirect": self.indirect,
             "suggestions": [
                 {"kind": s.kind, "label": s.label, "risk": s.risk, "why": s.why,
                  "file": s.op.file, "line": s.op.line, "end_line": s.op.end_line,
@@ -140,8 +149,10 @@ class CheckpointReport:
 
     def summary(self) -> str:
         n_pre = len(self.pre_run)
+        n_guard = len([p for p in self.points if p.guard])
+        guard_txt = f"，其中防改动守卫 {n_guard} 个" if n_guard else ""
         return (f"扫描 {self.files} 个 smali / {self.classes} 类 / {self.methods} 方法，"
-                f"命中 {len(self.points)} 个校验点（启动路径 {n_pre} 个），"
+                f"命中 {len(self.points)} 个校验点（启动路径 {n_pre} 个{guard_txt}），"
                 f"用时 {self.elapsed:.1f}s")
 
     def table(self, only_pre: bool = False, limit: int = 20) -> str:
@@ -959,6 +970,19 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
             if callee in index:
                 dq.append(index[callee])
 
+    # ---- 反射派发：混淆器把校验方法名藏进字符串，再用 Method.invoke 调 ----
+    # 静态调用图在这里必断（invoke 的 Method 对象是运行时构造的），
+    # 卡密判定就会"扫不到"。所以先把被点名的名字收齐，再在方法-level 认领。
+    _REFLECT_NAME = re.compile(r"^[A-Za-z_$][\w$]{1,40}$")
+    reflect_names: set[str] = set()
+    for m in all_methods:
+        for s in m.strings:
+            t = s.strip()
+            if not _REFLECT_NAME.match(t):
+                continue
+            if _VERB_NAME.match(t) or verify.match_method(t):
+                reflect_names.add(t)
+
     # ---- 逐方法判定 ----
     cand: list[Checkpoint] = []
     for m in all_methods:
@@ -999,6 +1023,31 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
         api_hit = bool(_CRYPTO_APIS.search(" ".join(m.calls) + " "
                                           + " ".join(t for _, t in m.body)))
 
+        # --- 防改动/防调试/防环境守卫 ---
+        # 这类方法往往名字毫无特征（a/b/c 或 run），靠"它调了什么 API、
+        # 比了什么常量"来认。重打包必然改变签名与 dex 字节，所以这些守卫
+        # 一旦命中就必须中和，否则包能装、一开就退。
+        body_text = "\n".join(t for _, t in m.body)
+        ghits = guards.scan_method(body_text, " ".join(m.calls), m.strings)
+        # 只有"会做判定"的方法才算守卫：算哈希/取签名串的工具方法（返回
+        # String/byte[]）是守卫的**零件**，改它等于改坏别人的哈希结果。
+        guard_hit = bool(ghits) and (m.ret in ("Z", "V", "I", "J")
+                                     or bool(m.exit_block))
+        if guard_hit:
+            g0 = ghits[0]
+            strong.insert(0, (g0.category, g0.why))
+            for g in ghits[1:]:
+                if (g.category, g.why) not in weak:
+                    weak.append((g.category, g.why))
+
+        # 反射派发点：方法名被常量点名 → 说明有地方在 invoke 它。
+        # 这类逻辑改的是"被调的方法"本身，所以照样能中和，只是不进启动 BFS。
+        reflect_hit = (m.name in reflect_names
+                       and m.ret in ("Z", "V", "Ljava/lang/String;"))
+        if reflect_hit and not strong:
+            strong.append(("反射调用",
+                           f"方法名被 const-string 点名（{m.name}），代码走反射调用"))
+
         # 中文卡密文案直接出现（"请输入卡密"/"验证并进入"）——
         # 这个方法所在的界面就是关卡页，比任何命名规则都硬。
         for s in m.strings[:20]:
@@ -1025,7 +1074,8 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
         killswitch = bool(strong) and bool(_KILLSWITCH_NAME.search(m.name))
         string_gate = (m.ret == "Ljava/lang/String;" and bool(strong))
         result_gate = (m.ret in result_like and bool(_VERB_NAME.match(m.name)))
-        gate = (bool_gate or killswitch or string_gate or result_gate
+        gate = (bool_gate or killswitch or string_gate or result_gate or guard_hit
+                or reflect_hit
                 or (m.branch and (bool(strong) or m.exit_block)))
         if not gate:
             continue
@@ -1050,11 +1100,54 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
                     break
 
         score, ev = _score(m, strong, weak, bool_gate, pre_run, blocked)
+        if guard_hit:
+            # 守卫不靠命名靠 API/常量，权重必须补上来 —— 漏掉一个
+            # 签名自校验，整个重打包的包就是"装了必退"。
+            score = min(97, score + 25)
+            ev.append("守卫 → " + "；".join(
+                f"{g.category}（{g.evidence[:24]}）" for g in ghits[:3]))
+        if reflect_hit:
+            score = min(97, score + 20)
+            ev.append("反射 → 方法名出现在 const-string 里（调用图断链，靠点名认领）")
         if score < min_confidence:
             continue
 
         sugs: list[Suggestion] = []
         neg = _is_negative(m)
+        # 生命周期方法里内联的守卫：清空 = 界面起不来，分支取反 = 可能正好改反。
+        # 这种只报不改，留给人工/Frida，绝不放进无人值守的补丁方案。
+        inline_guard = bool(guard_hit and _LIFECYCLE.match(m.name)
+                            and m.ret == "V")
+        if guard_hit and not inline_guard:
+            g0 = ghits[0]
+            if m.ret == "Z":
+                # 方向：pass 型守卫（签名/完整性）要"通过"，false 型（root/模拟器/
+                # 调试器）要"未命中"；名字是负面语义时把 pass 反过来。
+                want = (g0.neutral == "pass") and not neg
+                mt = _method_const_op(m, want)
+                if mt:
+                    sugs.append(Suggestion(
+                        kind="guard_short",
+                        label=f"{g0.category}中和：{m.name}() 恒返回 "
+                              f"{'true' if want else 'false'}（{g0.evidence[:26]}）",
+                        risk="低",
+                        why=f"这是「{g0.category}」守卫：{g0.why}。"
+                            "重打包必然改变签名与 dex 字节，这类判定一旦触发就是"
+                            "闪退/弹窗/锁功能。整体短路保留方法签名与参数，"
+                            "只让判定恒为「无问题」，调用方逻辑完全不受影响。",
+                        op=mt))
+            elif m.ret == "V":
+                vp = _void_noop_op(m)
+                if vp:
+                    sugs.append(Suggestion(
+                        kind="guard_noop",
+                        label=f"{g0.category}中和：{m.name}() 清空 —— "
+                              f"检测到也不再处置（{g0.evidence[:24]}）",
+                        risk="低",
+                        why=f"这是「{g0.category}」守卫，命中后的动作是"
+                            "退出/弹窗/锁功能。清空方法体后检测照跑但不再执行处置；"
+                            "void 方法清空不破坏调用方栈平衡，不会引起崩溃。",
+                        op=vp))
         # ① 路由改道（const-class 换）：没卡密也直接进主界面，最稳
         sugs.extend(_reroute_ops(m))
         # ② 字符串闸门：空卡密默认值 → 非空，一处改动覆盖全部调用方
@@ -1118,6 +1211,14 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
                     "改之前先确认它是否真的决定启动。")
         if cat == "服务端校验":
             note = "本地只看到 HTTP 调用，改本地只能骗过界面，权益仍在服务端。"
+        if inline_guard:
+            # 生命周期内联守卫：给建议就会有人（或自动化）照着改，
+            # 而这里最稳的改法恰恰是"别整体动它"。所以清空建议，只保留报告。
+            uniq = []
+            note = ("⚠ 防改动守卫内联在生命周期方法里（"
+                    + "、".join(g.category for g in ghits) + "）。"
+                    "整体清空会让界面起不来，自动补丁不敢碰；"
+                    "要么用 Frida hook，要么手工找到判定分支单独放行。")
         if m.ret == "V" and not uniq:
             note = (note + " " if note else "") + "返回 void，无法直接短路；" \
                     "优先考虑改调用处的分支或 hook。"
@@ -1127,7 +1228,8 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
         # 布尔闸门要看类别（通用判定/规则匹配类改了会误伤功能）；
         # invert/goto 只作人工备选，绝不自动应用。
         first = uniq[0].kind if uniq else ""
-        _SAFE_KINDS = {"reroute", "const_string", "fabricate_result", "void_noop"}
+        _SAFE_KINDS = {"reroute", "const_string", "fabricate_result", "void_noop",
+                       "guard_short", "guard_noop"}
         if first in _SAFE_KINDS:
             auto_safe = True
         elif first in ("method_true", "method_false", "const_flag"):
@@ -1143,10 +1245,14 @@ def analyze(smali_root: str | Path, max_files: int = 6000,
             category=cat, confidence=score, pre_run=pre_run, evidence=ev,
             chain=path.get(m.key, ""), returns=m.ret, suggestions=uniq,
             strings=m.strings[:6], note=note.strip(),
-            auto_safe=auto_safe))
+            auto_safe=auto_safe,
+            guard=guard_hit, guard_kind=(ghits[0].kind if ghits else ""),
+            guard_neutral=(ghits[0].neutral if ghits else ""),
+            inline_guard=inline_guard, indirect=reflect_hit))
 
-    # 排序：启动前优先，其次置信度、建议可用性
-    cand.sort(key=lambda c: (not c.pre_run, -c.confidence, not c.suggestions))
+    # 排序：守卫最前（漏一个就装了必退）→ 启动前优先 → 置信度 → 建议可用性
+    cand.sort(key=lambda c: (not c.guard, not c.pre_run, -c.confidence,
+                             not c.suggestions))
     for i, c in enumerate(cand, 1):
         c.cid = f"P{i:03d}"
     rep.points = cand
@@ -1162,13 +1268,16 @@ def to_plan(rep: CheckpointReport, ids: list[str] | None = None,
             only_pre: bool = False, max_ops: int = 20,
             safe_only: bool = False,
             min_confidence: int = 0,
-            include_running: bool = False) -> list[PatchOp]:
+            include_running: bool = False,
+            guards_only: bool = False) -> list[PatchOp]:
     """
     把选中的校验点变成补丁操作序列。
 
     safe_only=True 只收"无人值守安全"的点（不含 invert/goto 误伤类）；
     include_running=True 把非启动路径的杀招（服务器复核/失效处理）也收进来
     —— 那些不在启动 BFS 里，但运行中一定会触发。
+    guards_only=True 只出防改动/防调试守卫（用于"我只要守卫"的场景，
+    或指定 ids 时把守卫单独补进来 —— 漏一个守卫，包就是装了必退）。
     """
     if ids:
         pts = [rep.get(i) for i in ids]
@@ -1176,11 +1285,19 @@ def to_plan(rep: CheckpointReport, ids: list[str] | None = None,
         pts = []
         if only_pre:
             pts.extend(rep.pre_run)
+            # 守卫与反射派发点必须无条件纳入：签名/调试器检测常跑在后台线程，
+            # 卡密方法也可能被反射调用 —— 静态调用图断链 → 它们不在 pre_run 里，
+            # 但一味漏掉就是"装了必退"或"改了没用"。
+            have = {p.cid for p in pts}
+            pts.extend(p for p in rep.points
+                       if (p.guard or p.indirect) and p.cid not in have)
         if include_running:
             have = {p.cid for p in pts}
             pts.extend(p for p in rep.points if p.cid not in have)
         if not pts and not only_pre:
             pts = rep.points
+    if guards_only:
+        pts = [p for p in pts if p and p.guard]
     ops: list[PatchOp] = []
     for p in pts:
         if not p or not p.best:
@@ -1242,34 +1359,59 @@ def to_frida(rep: CheckpointReport, ids: list[str] | None = None) -> str:
     """
     生成 Frida 覆盖脚本（不改包，运行时替换返回值）。
 
-    适用：加了壳、smali 改不动，或只想先验证"改这里有没有用"。
-    方向按方法名判断：isExpired/isRooted 返回 false，verify/isVip 返回 true。
+    什么时候必须用它：包加了壳 / 代码抽取 / 守卫内联在 onCreate ——
+    这些 smali 改不动，或者一改界面就起不来。挂这个脚本能先让程序跑起来，
+    也能用来验证"改这里到底有没有用"。
+
+    方向：守卫按 guard_neutral（pass→true / false→false），
+    其他按方法名（isExpired/isRooted → false，verify/isVip → true）。
+    void 守卫挂成空实现（检测照跑，不再弹窗/退出）。
     """
-    pts = [rep.get(i) for i in ids] if ids else rep.pre_run
+    if ids:
+        pts = [rep.get(i) for i in ids]
+    else:
+        pts = list(rep.pre_run)
+        have = {p.cid for p in pts if p}
+        pts.extend(p for p in rep.points
+                   if (p.guard or p.indirect) and p.cid not in have)
     lines = [
         "// ReverseForge 生成 · 校验点运行时覆盖",
         "// 用法：frida -U -f <包名> -l this.js --no-pause",
-        "// 说明：只覆盖布尔返回值；void 校验点需要按业务逻辑改写。",
+        "// 说明：布尔守卫恒返回「无问题」；void 守卫挂成空实现。",
         "Java.perform(function () {",
     ]
     n = 0
     for p in pts:
-        if not p or p.returns != "Z":
+        if not p:
+            continue
+        if p.returns not in ("Z", "V"):
             continue
         cls = p.cls.strip("L;").replace("/", ".")
         params = _split_params(p.signature.split(")")[0].lstrip("("))
         overload = ", ".join(f'"{_js_type(x)}"' for x in params)
-        want = "false" if _NEG_WORDS.search(p.method) else "true"
+        if p.returns == "V":
+            want = None
+            body = "      console.log(\"[RF] " + p.cls_simple + "." + p.method + " 被调用（已空实现）\");"
+        else:
+            if p.guard and p.guard_neutral == "pass":
+                want = True
+            elif p.guard and p.guard_neutral == "false":
+                want = False
+            else:
+                want = not bool(_NEG_WORDS.search(p.method))
+            body = (f'      console.log("[RF] {p.cls_simple}.{p.method} 被调用，'
+                    f'已返回 {"true" if want else "false"}");')
         var = f"C{p.cid[1:]}"
-        lines.append(f"  // {p.cid} {p.category} 置信度 {p.confidence}")
+        lines.append(f"  // {p.cid} {p.category} 置信度 {p.confidence}"
+                     + ("（守卫）" if p.guard else ""))
         lines.append("  try {")
         lines.append(f'    var {var} = Java.use("{cls}");')
         if overload:
             lines.append(f"    {var}.{p.method}.overload({overload}).implementation = function () {{")
         else:
             lines.append(f"    {var}.{p.method}.implementation = function () {{")
-        lines.append(f'      console.log("[RF] {p.cls_simple}.{p.method} 被调用，已返回 {want}");')
-        lines.append(f"      return {want};")
+        lines.append(body)
+        lines.append("      return" + (f" {'true' if want else 'false'};" if want is not None else ";"))
         lines.append("    };")
         lines.append(f"  }} catch (e) {{ console.log('[RF] 覆盖失败 {p.cid}：' + e); }}")
         n += 1
@@ -1285,6 +1427,17 @@ def report_md(rep: CheckpointReport, limit: int = 40) -> str:
         L += ["## 问题", ""] + [f"- {e}" for e in rep.errors] + [""]
     if rep.entries:
         L += ["## 启动入口", "", "、".join(f"`{e}`" for e in rep.entries), ""]
+    guards = [p for p in rep.points if p.guard]
+    if guards:
+        L += ["## 防改动 / 防调试守卫", "",
+              "> 重打包必然改变签名与 dex 字节，这些判定一旦触发就是闪退/弹窗/锁功能。",
+              ""]
+        for p in guards[:limit]:
+            tag = "（生命周期内联，只报不改）" if p.inline_guard else ""
+            L.append(f"- {p.cid} `{p.cls_simple}.{p.method}` · {p.category}"
+                     f" · 置信度 {p.confidence}{tag} → "
+                     f"{p.best.label if p.best else '无自动改法'}")
+        L.append("")
     L += ["## 启动路径上的校验点", ""]
     pre = rep.pre_run
     if not pre:

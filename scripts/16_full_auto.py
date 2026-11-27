@@ -45,6 +45,27 @@
     运行中复核与失效处理被清空 —— 服务器说什么都不影响 App 继续跑。
     服务端真正的权益（远程停卡、在线规则推送）在服务器上，本地补丁不碰。
 
+【防改动 / 防调试 / 防环境 —— 开发者的"精明劲"怎么处理】
+    重打包必然改变三样东西：签名、dex 的 CRC/摘要、assets 哈希。
+    于是常见套路是"一装就退"：
+
+        读 PackageInfo.signatures 比硬编码指纹      → ③ 中和为「签名正确」
+        读 ZipEntry.getCrc / sourceDir 算 dex 摘要    → ③ 中和为「完整」
+        Debug.isDebuggerConnected / TracerPid         → ③ 中和为「没调试器」
+        扫 frida / xposed / magisk / maps             → ③ 中和为「没注入」
+        su 路径 / test-keys 判 root                   → ③ 中和为「没 root」
+        goldfish / qemu / vbox 判模拟器               → ③ 中和为「真机」
+        firstInstallTime / lastUpdateTime 判重装      → ③ 中和为「原装」
+
+    中和方式只有两种，都不破坏调用方：
+        boolean 守卫 → 整个方法恒返回「无问题」（保留签名与参数）
+        void 守卫    → 方法体清空（检测照跑，但不再弹窗/退出/锁功能）
+
+    不自动碰的（会明确写进报告，不假装处理过）：
+        · 守卫内联在 onCreate 这类生命周期里 —— 清空会让界面起不来
+        · 逻辑在 so / VMP / 抽取壳里 —— dex 补丁改不到，得先脱壳
+    加固体检会单独落盘 `加固体检.md`：壳型号、抽取特征、动态加载、原生库。
+
 产物在「全自动化」目录，原文件不动，改动有备份可回滚。
 """
 
@@ -151,12 +172,14 @@ if target.is_file():
 LED.inp(target, _kind, "原始样本（只读，全程不修改）")
 
 gate = {"结构": "未做", "签名": "未做", "回读": "未做",
-        "运行": "未验证（无设备/非 APK）"}
+        "运行": "未验证（无设备/非 APK）", "守卫": "未做"}
+guard_stat: dict = {"found": 0, "done": 0, "skipped": []}
 desktop_apk = None
 final_apk = None
 _unpack_result = None
 _nonapk = False
 _dec_files: list[Path] = []
+HARDCASE: dict = {"hr": None}          # 加固体检结果（壳/抽取/动态 dex）
 
 
 # ---------------------------------------------------------------------------
@@ -497,8 +520,27 @@ def _runtime_kill_switches(rep, chosen: list) -> list:
     return out
 
 
+def do_hardening(root: Path) -> None:
+    """③a 加固体检：壳 / 抽取 / 动态 dex / 原生库 —— 这些 dex 补丁管不着，
+    必须如实报出来，不能假装"处理完了"。"""
+    rf.step("③a 加固体检", 44)
+    from rf.patch import guards as G
+    hr = G.scan_hardening(root)
+    HARDCASE["hr"] = hr
+    lines = hr.lines()
+    if not lines:
+        put("- 没有壳/加固特征：dex 是明文，smali 可直接改。")
+        return
+    put(f"- 发现 {len(lines)} 类硬手段：")
+    for ln in lines:
+        put("  " + ln)
+    if hr.is_packed:
+        put("- ⚠ 加固包：卡密逻辑可能被抽进 so / 加密 dex，"
+            "dex 补丁只对明面部分有效。真逻辑要先脱壳再改。")
+
+
 def do_patch(root: Path) -> list:
-    rf.step("③ 扫描前置验证点", 45)
+    rf.step("③ 扫描前置验证点", 46)
     # 全工具只有这一处补丁判据（原来 15/16 各写一遍，同一份 APK
     # 一个出 20 条能过、一个出 10 条还要卡密，就是这么来的）。
     rep = rf.patch_scan(root)
@@ -511,16 +553,33 @@ def do_patch(root: Path) -> list:
         return []
 
     pre = len(rep.pre_run)
+    gpts = [p for p in rep.points if p.guard]
+    guard_stat["found"] = len(gpts)
     put(f"- 校验点 {len(rep.points)} 个（启动路径 {pre} 个）")
+    if gpts:
+        put(f"- 防改动/防调试守卫 {len(gpts)} 个（重打包必然踩，逐条中和）：")
+        for p in gpts[:12]:
+            tag = "　⚠ 内联在生命周期，仅报告" if p.inline_guard else ""
+            put(f"  · {p.category} · {p.cls_simple}.{p.method}{tag}")
 
     rf.step("③ 生成补丁方案", 52)
     # 只保留一套判据（原来「15 一键绕过」和这里各写一遍，结果不一致）。
-    # 第一步：启动路径上的点，不过滤安全、不设置信度门槛、上限 20 条。
+    # 第一步：启动路径上的点 + 全部守卫（守卫不在路径上也得改），
+    # 不过滤安全、不设置信度门槛、上限放宽到 30 条给守卫留位置。
     _ids = [x.strip() for x in str(ids or "").replace("，", ",").split(",")
             if x.strip()]
-    ops = rf.patch_plan(rep, ids=_ids or None, only_pre=True, max_ops=20,
+    ops = rf.patch_plan(rep, ids=_ids or None, only_pre=True, max_ops=30,
                         min_confidence=int(min_conf or 0))
-    #
+    if _ids:
+        # 点名改某几个点时，守卫仍然必须补进来：
+        # 漏掉一个签名自校验，包能装、一开就退，点名改的东西也白改。
+        have = {(o.file, o.line) for o in ops}
+        for o in rf.patch_plan(rep, only_pre=True, max_ops=30,
+                               min_confidence=0, guards_only=True):
+            if (o.file, o.line) not in have:
+                ops.append(o)
+                have.add((o.file, o.line))
+        put(f"- 已指定校验点 {len(_ids)} 个，另自动补入守卫补丁")
     # 第二步：全自动化**唯一多出来的那一步** —— 把运行中的服务器复核 /
     #        失效处理也删掉。只认「清空方法体」这一类（void_noop）：
     #        服务器判卡密失效后调的方法，清空后照样跑，且 void 方法清空
@@ -539,6 +598,30 @@ def do_patch(root: Path) -> list:
     put(f"- 补丁 {len(ops)} 条（含运行中复核/失效处理）：")
     for op in ops:
         put(f"  · {op.reason[:90]}")
+
+    # 守卫结算：哪些已中和、哪些真没辙 —— 明写，不冒充"全处理完了"
+    _done = {p.cid for p in gpts if p.suggestions
+             and not p.inline_guard}
+    if gpts:
+        _skip = [p for p in gpts if p.cid not in _done]
+        guard_stat["done"] = len(_done)
+        guard_stat["skipped"] = [(p.category, p.cls_simple, p.method)
+                                 for p in _skip]
+        if _skip:
+            put(f"- ⚠ {len(_skip)} 个守卫没法自动中和（内联在生命周期 / so 内）：")
+            for p in _skip[:8]:
+                put(f"    · {p.category} · {p.cls_simple}.{p.method}")
+
+    # 改不动的部分（内联守卫 / 壳）→ 给一份 Frida 覆盖脚本，运行时照样解决。
+    _hr = HARDCASE.get("hr")
+    if _skip or (_hr is not None and _hr.is_packed):
+        try:
+            js = rf.frida(rep, out=out / "hook.js")
+            put(f"- ✓ Frida 覆盖脚本：`{js.name}`"
+                "（`frida -U -f 包名 -l hook.js` → 不改包也能先跑起来）")
+            LED.outp("③ Frida", js, "覆盖没能自动中和的守卫", "Frida 脚本")
+        except Exception as e:                              # noqa: BLE001
+            put(f"- Frida 脚本生成失败（不影响成品）：{e}")
 
     rf.step("③ 预演（不写盘）", 56)
     dry = rf.patch_apply(root, ops, dry_run=True, backup=out / "备份")
@@ -563,10 +646,21 @@ def do_pack(root: Path, ops: list) -> Path:
     stem = base_stem(target.name)
     apk_out = out / f"{stem}_已绕过.apk"
     rb = rf.patch_rebuild(root, out=apk_out, ops=ops or None, sign=True)
-    if not rb.ok and target.is_file():
+    # 退路（只换 dex，原资源原样搬）必须有一个原始 APK 当底。
+    # 输入本身是解包目录时，往上找一层同名目录里的 apk —— 重新调过一次的
+    # 场景很常见（拖目录接着改），没有底就只能如实报失败。
+    _src = target if target.is_file() else None
+    if not rb.ok and _src is None:
+        for _p in (target.parent, target.parent.parent):
+            _c = sorted(_p.glob("*.apk"), key=lambda x: -x.stat().st_size)[:1]
+            if _c:
+                _src = _c[0]
+                put(f"- 用同级 APK 当重建底：`{_src.name}`")
+                break
+    if not rb.ok and _src is not None:
         put("- 完整重建失败（资源编译问题），启用退路：只换 dex，原资源保留")
         rf.step("④b 只换 dex 重建", 76)
-        rb = rf.patch_rebuild_dex(target, root, out=apk_out, ops=ops or None,
+        rb = rf.patch_rebuild_dex(_src, root, out=apk_out, ops=ops or None,
                                   sign=True)
     gate["签名"] = "通过" if rb.verified else "未通过"
     gate["回读"] = "确认" if rb.roundtrip else "未确认"
@@ -713,6 +807,7 @@ elif stage == "unpack":
 else:
     do_decrypt(root)
     if stage not in ("decrypt",):
+        do_hardening(root)
         ops = do_patch(root)
         if stage != "patch":
             main_product = do_pack(root, ops)
@@ -722,6 +817,17 @@ else:
             put("- 按要求只执行到打补丁（没重新打包）")
 
 # ---- 结果段 ----
+if guard_stat["found"]:
+    if guard_stat["skipped"]:
+        gate["守卫"] = (f"已中和 {guard_stat['done']}/{guard_stat['found']}，"
+                       f"剩 {len(guard_stat['skipped'])} 处需手工/Frida")
+    else:
+        gate["守卫"] = f"全部中和（{guard_stat['done']} 处）"
+elif _nonapk:
+    gate["守卫"] = "不适用（非 APK）"
+else:
+    gate["守卫"] = "未发现（该包没有签名/调试/环境检测）"
+
 put("")
 put("## 三、结果")
 for k, v in gate.items():
@@ -731,6 +837,28 @@ if _nonapk:
         "（进去什么类型，出来还是什么类型）")
     if bool(run_verify):
         put("- 「真机安装验证」只对 APK 生效，本轮跳过（装不了 .sh/ELF）")
+
+# ---- 加固体检落盘（壳 / 抽取 / 动态 dex / so）----
+_hr = HARDCASE.get("hr")
+_hmd = None
+if _hr is not None:
+    _hl = _hr.lines() or ["- 无：dex 明文，没有壳/抽取/动态加载特征"]
+    _hmd = out / "加固体检.md"
+    _hmd.write_text("\n".join(
+        ["# 加固体检", "",
+         f"- 目标：`{target}`",
+         f"- 结论：{'**加固/壳**，dex 补丁只对明面部分有效' if _hr.is_packed else '未发现壳'}",
+         "", "## 清单", ""] + _hl +
+        ["", "## 这些手段怎么处理", "",
+         "- 防改动（签名/CRC/哈希）、防调试、防 root/模拟器/注入：已在 ③ 中和，",
+         "  改法是把判定方法整体短路成「无问题」，调用方逻辑不变。",
+         "- 壳 / 代码抽取 / 动态加载 dex：改 smali 无效 —— 真实逻辑运行时才出现，",
+         "  需先用 frida-dexdump 一类工具脱壳，再对 dump 出的 dex 重跑本流程。",
+         "- 卡密若在 so 里：dex 补丁只能让界面认为已授权，功能仍可能被 so 拒；",
+         "  需 Ghidra/IDA 定位 so 内校验点（本工具可给出偏移与字符串线索）。"]),
+        encoding="utf-8")
+    LED.outp("③a 加固体检", _hmd, "壳/抽取/动态加载/原生库清单", "体检报告")
+    body.append(f"- 加固体检 → `{_hmd.name}`")
 
 md, js = _write_manifest()
 
@@ -746,7 +874,7 @@ final_md.write_text("\n".join(head + _io_tables() + [""] + body),
 
 # 成品是归档就把清单/报告塞进去
 if main_product is not None and main_product.suffix.lower() == ".zip":
-    _append_into_zip(main_product, [md, js, final_md])
+    _append_into_zip(main_product, [f for f in (md, js, final_md, _hmd) if f])
 
 rf.log(f"✓ 报告：{final_md}")
 rf.log(f"✓ 清单：{md}")
