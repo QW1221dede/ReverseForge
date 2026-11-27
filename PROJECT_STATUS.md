@@ -169,7 +169,7 @@ unpack_arrogance(1)/
 | 自测 | **14 套全绿**；带计数的 7 套共 **221 项**（44 假包 / 46 真机 / 48 守卫 / 30 终结符 / 27 联网 / 15 完整性 / 11 拆包），其余 7 套无计数输出 |
 | 成品 | `dist/ReverseForge/ReverseForge.exe`，5.8 MB，整目录 47.1 MB，已按 v1.0.6 重打 |
 | 发布包 | `release/` 为空，v1.0.6 的 zip 未打（`python release.py --skip-build`） |
-| 平台 | Gitee + GitHub 双仓库（master），最新代码已本地提交，**尚未推送** |
+| 平台 | **Gitee 已推到 `4c6ff63`**；GitHub 直连 443 全超时（三个 IP 均 000），`.git/rf_push_api.py` 只支持逐提交推（远端必须等于本地父提交），本次两提交链未推 → **GitHub 落后 v1.0.6** |
 | 样本验证 | `arrogance(1).sh` 全链跑通：识别→切 makeself→gzip→UPX 脱壳→7 个 ELF |
 
 ---

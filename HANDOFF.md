@@ -246,6 +246,10 @@ git -c credential.helper= -c http.curloptResolve="github.com:443:<可用IP>" \
 
 - GitHub 直连大面积被重置，仓库里已有 `.git/rf_push_api.py` + `.git/rf_tok`
   （GitHub API 建 blob/tree/commit 绕过 git 传输），`github.com:443` 超时就改走它。
+- **2026-11-28 实测**：三个候选 IP 均超时（000），API 脚本可用但**只支持单提交**
+  （要求远端 master == 本地 HEAD 的父提交）。本次 v1.0.6 是两个提交，
+  直接跑会中止。补推办法：先 `git checkout --detach 4bf3223` 跑一次脚本，
+  再回 master 用备份的新文档重新提交、再跑一次。**目前 GitHub 停在 v1.0.5。**
 - 坑：`git push | tail` 判断成功是错的（tail 恒真），要
   `echo "$o" | grep -q "refs/heads/master"`。
 - 坑：`credential.helper` 残留旧令牌会覆盖 URL 里的 token，必须 `-c credential.helper=`。
