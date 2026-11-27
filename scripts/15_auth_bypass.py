@@ -100,54 +100,65 @@ def do_apk(t: Path) -> bool:
     rep = rf.patch_scan(root)
     put(f"- {rep.summary()}")
     pre = rep.pre_run
+    ops: list = []
     if not pre:
-        put("- 没找到启动路径上的校验点。可能逻辑在别处，"
-            "试试对话页说「找卡密校验」重新分析。")
-        return False
-    for p in pre[:12]:
-        put(f"  · {p.cid} {p.cls_simple}.{p.method} · {p.category} · {p.confidence}%")
-        if p.best:
-            put(f"      改法：{p.best.label}")
+        put("- 没找到启动路径上的校验点。两种可能：")
+        put("    · 这个包已经打过补丁（校验点被改掉，再扫自然扫不出来）")
+        put("    · 逻辑在 so / 加固壳里，dex 侧没有可改的地方")
+        put("- 不中断：按现有 smali 直接重建，成品照样出（不会卡死在这里）。")
+        gate["结构"] = "无校验点可改（可能已处理过），按现状重建"
+        if mode == "scan":
+            put("- 只扫描模式，到此为止。")
+            return False
+    else:
+        for p in pre[:12]:
+            put(f"  · {p.cid} {p.cls_simple}.{p.method} · {p.category} · {p.confidence}%")
+            if p.best:
+                put(f"      改法：{p.best.label}")
 
-    ids_list = [x.strip() for x in str(ids or "").replace("，", ",").split(",") if x.strip()]
-    rf.step("③ 生成补丁方案", 32)
-    ops = rf.patch_plan(rep, ids=ids_list or None, only_pre=True)
-    if not ops:
-        put("- 没有可自动应用的补丁建议。")
-        return False
-    put(f"- 方案 {len(ops)} 条")
+        ids_list = [x.strip() for x in str(ids or "").replace("，", ",").split(",") if x.strip()]
+        rf.step("③ 生成补丁方案", 32)
+        ops = rf.patch_plan(rep, ids=ids_list or None, only_pre=True)
+        if not ops:
+            put("- 没有可自动应用的补丁建议；按现状重建，卡密可能仍需手动处理。")
+        else:
+            put(f"- 方案 {len(ops)} 条")
 
-    if mode == "scan":
-        put("- 只扫描模式，到此为止。")
-        return False
+        if mode == "scan":
+            put("- 只扫描模式，到此为止。")
+            return False
 
-    rf.step("④ 预演（不写盘）", 42)
-    dry = rf.patch_apply(root, ops, dry_run=True, backup=out / "备份")
-    put(f"- 预演：{dry.text().splitlines()[0]}")
-    if not dry.ok:
-        put("- 预演没过，停止。原文件没动。")
-        return False
+    if ops:
+        rf.step("④ 预演（不写盘）", 42)
+        dry = rf.patch_apply(root, ops, dry_run=True, backup=out / "备份")
+        put(f"- 预演：{dry.text().splitlines()[0]}")
+        if not dry.ok:
+            put("- 预演没过，停止。原文件没动。")
+            return False
 
-    rf.step("⑤ 应用补丁", 52)
-    if mode == "patch":
-        put("- 只打补丁模式，不重建。")
-        return True
-    res = rf.patch_apply(root, ops, dry_run=False, backup=out / "备份")
-    put(f"- 应用：{res.text().splitlines()[0]}")
-    if not res.ok:
-        put("- 补丁失败，已自动回滚。")
-        return False
-    gate["结构"] = "补丁已写入（smali 汇编校验通过，待打进 APK）"
+        rf.step("⑤ 应用补丁", 52)
+        if mode == "patch":
+            put("- 只打补丁模式，不重建。")
+            return True
+        res = rf.patch_apply(root, ops, dry_run=False, backup=out / "备份")
+        put(f"- 应用：{res.text().splitlines()[0]}")
+        if not res.ok:
+            put("- 补丁失败，已自动回滚。")
+            return False
+        gate["结构"] = "补丁已写入（smali 汇编校验通过，待打进 APK）"
+    else:
+        # 没有补丁可打（已处理过 / 无建议）：直接重建，把现有 smali 打成包
+        rf.step("④ 跳过补丁，直接重建", 52)
 
     rf.step("⑥ 重建 + 签名 + 回读", 66)
-    rb = rf.patch_rebuild(root, out=out / "bypass.apk", ops=ops, sign=True)
+    rb = rf.patch_rebuild(root, out=out / "bypass.apk", ops=ops or None, sign=True)
     put(f"- {rb.text()}")
     if not rb.ok and t.is_file():
         # aapt2 编资源常炸，但 dex 早汇编好了。只换 dex、原资源搬过去。
         put("- 完整重建失败，启用退路：只换 dex，原 APK 资源原样保留。")
         rf.step("⑥b 只换 dex 重建", 72)
         rb = rf.patch_rebuild_dex(t, root, out=out / "bypass.apk",
-                                  ops=ops, sign=True)
+                                  ops=ops or None, sign=True)
         put(f"- {rb.text()}")
         if rb.ok:
             put("- ✓ 这条退路保留了原资源，签名和回读都过了。")
@@ -164,9 +175,9 @@ def do_apk(t: Path) -> bool:
     if bool(to_desktop):
         rf.step("⑦b 成品放桌面", 92)
         try:
-            from rf.tools.desktop import drop_to_desktop
+            from rf.tools.desktop import base_stem, drop_to_desktop
             desktop_apk, msg = drop_to_desktop(
-                rb.apk, name=t.stem if t.is_file() else "patched",
+                rb.apk, name=base_stem(t.name) if t.is_file() else "patched",
                 tag="已绕过")
             put(f"- {msg}")
         except Exception as e:                       # noqa: BLE001

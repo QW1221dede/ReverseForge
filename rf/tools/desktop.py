@@ -64,17 +64,38 @@ def safe_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")[:80] or "output"
 
 
-def split_ext(name: str) -> tuple[str, str]:
-    """把文件名拆成 (主体, 完整后缀)。.tar.gz / .7z.001 这类多段后缀整体算后缀。
+_MULTI_SUFFIX = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4",
+                 ".tar.lzma")
 
-    不用 Path(name).stem / .suffix —— 那只会认最后一段，
-    重名编号时会把 foo.tar.gz 变成 foo.tar_2.gz。
+
+def split_ext(name: str) -> tuple[str, str]:
+    """把文件名拆成 (主体, 完整后缀)。
+
+    规则：默认只认**最后一段**后缀（`ACE拦截2.0.apk` 的主体是 `ACE拦截2.0`，
+    不能按第一个点切，否则会变成 `ACE拦截2`）；`.tar.gz` 这类复合后缀整体算后缀。
     """
     n = Path(name).name
-    for i, ch in enumerate(n):
-        if ch == "." and i > 0:
-            return n[:i], n[i:]
-    return n, ""
+    low = n.lower()
+    for suf in _MULTI_SUFFIX:
+        if low.endswith(suf) and len(n) > len(suf):
+            return n[:-len(suf)], n[-len(suf):]
+    i = n.rfind(".")
+    if i <= 0:                       # 没有后缀，或 .bashrc 这种点开头的
+        return n, ""
+    return n[:i], n[i:]
+
+
+def base_stem(name: str) -> str:
+    """成品命名用的主体名：`ACE拦截2.0.apk.1` → `ACE拦截2.0`。
+
+    下载器常在 .apk 后面加 `.1`；不处理的话产物会叫
+    `ACE拦截2.0.apk_已绕过.apk`，看着像坏文件。
+    """
+    n = Path(name).name
+    m = re.match(r"(?i)^(.*)\.(apk|aab|apks|xapk)(\.\d+)?$", n)
+    if m and m.group(1):
+        return m.group(1)
+    return split_ext(n)[0]
 
 
 def unique_path(directory: Path, name: str) -> Path:
@@ -101,7 +122,9 @@ def drop_to_desktop(src: str | Path, name: str = "",
     if not s.exists():
         raise RuntimeError(f"成品不存在：{s}")
     desk = desktop_dir()
-    stem = safe_name(Path(name).stem if name else split_ext(s.name)[0])
+    # name 传进来时**已经是主体名**（可能自带点，如 ACE拦截2.0），
+    # 不能再走 Path(name).stem —— 那会把 .0 当后缀吃掉。
+    stem = safe_name(name) if name else safe_name(split_ext(s.name)[0])
     _, ext = split_ext(s.name)          # 真实后缀，可能为空（无后缀文件）
     out = unique_path(desk, f"{stem}_{tag}{ext}")
     shutil.copy2(s, out)

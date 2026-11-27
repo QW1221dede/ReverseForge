@@ -5,7 +5,7 @@
 # @param target 文件或文件夹（从投放区取） [file]
 # @param stage 执行到哪一步 [choice:all,unpack,decrypt,patch,pack:all]
 # @param to_desktop 成品自动复制到桌面 [bool:true]
-# @param min_conf 只应用置信度不低于此值的"安全"补丁 [int:40]
+# @param min_conf 只应用置信度不低于此值的补丁（0=跟「一键绕过」完全同款，不过滤） [int:0]
 
 """
 全自动化页的引擎：每一步都能单独跑，也能一口气跑完。
@@ -41,12 +41,14 @@
 
 import hashlib
 import json
+import re
 import shutil
 import time
 import zipfile
 from pathlib import Path
 
-from rf.tools.desktop import split_ext
+from rf.tools.desktop import base_stem, split_ext
+
 
 target = Path(target)
 if not target.exists():
@@ -333,7 +335,8 @@ def _zip_dir(zpath: Path, src: Path, exclude: set[Path]) -> None:
 def do_pack_any(root: Path) -> Path:
     """④ 按原类型重建：进去 .sh 出来就是能跑的 .sh，进去 zip 出来还是 zip。"""
     rf.step("④ 按原类型重建成品", 78)
-    stem, ext = split_ext(target.name)
+    stem = base_stem(target.name)
+    ext = split_ext(target.name)[1]
     real = (_kind.real if _kind else "") or target.suffix.lower().lstrip(".")
 
     # --- A) 单文件输入：保真重建，绝不改后缀 ---
@@ -454,25 +457,81 @@ def do_decrypt(root: Path) -> int:
 # ---------------------------------------------------------------------------
 # ③ 一键删除前置验证（APK 分支）
 # ---------------------------------------------------------------------------
+def _runtime_kill_switches(rep, chosen: list) -> list:
+    """运行中的服务器复核 / 失效处理 —— 只收「清空方法体」这一类。
+
+    为什么这么挑：这类方法名叫 onLicenseInvalid / recheckLicense，
+    服务器判卡密失效就调它停功能。清空之后服务器说什么都不影响运行；
+    而且它们是 void，清空不会破坏调用方的栈平衡，App 不会崩。
+    别的运行时方法（matchIp / domainHit 之类通用判定）一律不碰 ——
+    碰了就会出现"包能装、一开就闪退/功能残废"。
+    """
+    have = {(getattr(o, "file", ""), getattr(o, "line", -1)) for o in chosen}
+    pre = {p.cid for p in rep.pre_run}
+    out = []
+    for p in rep.points:
+        if p.cid in pre or not p.best:
+            continue
+        if p.best.kind != "void_noop":
+            continue
+        if p.category not in ("授权校验", "完整性校验", "服务端校验"):
+            continue
+        if p.confidence < 30:
+            continue
+        op = p.best.op
+        if (op.file, op.line) in have:
+            continue
+        op.reason = (f"[{p.cid}] 运行时短路 · {p.cls_simple}.{p.method}："
+                     f"{p.best.label}｜服务器判失效也不停功能")
+        out.append(op)
+        have.add((op.file, op.line))
+    return out
+
+
 def do_patch(root: Path) -> list:
     rf.step("③ 扫描前置验证点", 45)
-    rep = rf.patch_scan(root, min_confidence=35)
+    # 判据跟「一键绕过」完全一致（同一套 patch_scan / patch_plan 默认值）。
+    # 之前这里多加了 safe_only=True + min_confidence=40，把真正卡住启动的
+    # 那几个点滤掉了 —— 结果「一键绕过」能生效、全自动化打出来却还要卡密。
+    rep = rf.patch_scan(root)
     if not rep.points:
-        raise RuntimeError("没有识别到校验点。这包可能加固了（逻辑在 so 里），"
-                           "把日志发对话页进一步分析。")
+        put("- 扫描不到校验点。两种可能：")
+        put("    · 这个包之前已经打过补丁（校验点被改掉，再扫自然扫不出来）")
+        put("    · 逻辑在 so / 加固壳里，dex 侧没有可改的地方")
+        put("- 不中断流程：按现有 smali 继续重建，成品照样出（不会被这一步卡死）。")
+        gate["结构"] = "无校验点可改（可能已处理过），按现状重建"
+        return []
+
     pre = len(rep.pre_run)
     put(f"- 校验点 {len(rep.points)} 个（启动路径 {pre} 个）")
 
-    rf.step("③ 生成安全补丁方案", 52)
-    ops = rf.patch_plan(rep, only_pre=True, safe_only=True,
-                        include_running=True, max_ops=24,
-                        min_confidence=int(min_conf or 40))
+    rf.step("③ 生成补丁方案（与一键绕过同一套判据）", 52)
+    #
+    # 第一步：与「一键绕过」**完全同一套** —— 启动路径上的点，不过滤安全、
+    #        不设置信度门槛、上限 20 条。之前这里多加了 safe_only=True +
+    #        min_confidence=40，20 条被砍到 10 条（MainActivity / LicNet /
+    #        LicenseApi / Dh 全被滤掉），所以「绕过」能生效、自动化却还要卡密。
+    ops = rf.patch_plan(rep, only_pre=True, max_ops=20,
+                        min_confidence=int(min_conf or 0))
+    #
+    # 第二步：全自动化**唯一多出来的那一步** —— 把运行中的服务器复核 /
+    #        失效处理也删掉。只认「清空方法体」这一类（void_noop）：
+    #        服务器判卡密失效后调的方法，清空后照样跑，且 void 方法清空
+    #        不会破坏调用方的栈平衡，不会让 App 崩（不是无脑全量加补丁）。
+    extra = _runtime_kill_switches(rep, ops)
+    if extra:
+        put(f"- 额外删除运行中服务器校验 {len(extra)} 处（这一步是自动化独有的）：")
+        for op in extra:
+            put(f"  · {op.reason[:90]}")
+        ops.extend(extra)
     if not ops:
-        raise RuntimeError("识别到了校验点，但没有敢自动应用的改法。"
-                           "打开「补丁」页人工挑，或在对话页让 AI 分析。")
-    put(f"- 安全补丁 {len(ops)} 条（只收确定性改法，不含误伤类）：")
+        put("- 识别到校验点，但没有可自动应用的改法（缺 best 建议）。"
+            "不中断：按现状重建，卡密可能仍需手动处理。")
+        gate["结构"] = "有校验点但无自动改法，按现状重建"
+        return []
+    put(f"- 补丁 {len(ops)} 条（含运行中复核/失效处理）：")
     for op in ops:
-        put(f"  · {op.reason[:80]}")
+        put(f"  · {op.reason[:90]}")
 
     rf.step("③ 预演（不写盘）", 56)
     dry = rf.patch_apply(root, ops, dry_run=True, backup=out / "备份")
@@ -494,17 +553,21 @@ def do_patch(root: Path) -> list:
 def do_pack(root: Path, ops: list) -> Path:
     global final_apk
     rf.step("④ 一键打包（重建+签名+验签）", 72)
-    stem = split_ext(target.name)[0]
+    stem = base_stem(target.name)
     apk_out = out / f"{stem}_已绕过.apk"
-    rb = rf.patch_rebuild(root, out=apk_out, ops=ops, sign=True)
+    rb = rf.patch_rebuild(root, out=apk_out, ops=ops or None, sign=True)
     if not rb.ok and target.is_file():
         put("- 完整重建失败（资源编译问题），启用退路：只换 dex，原资源保留")
         rf.step("④b 只换 dex 重建", 76)
-        rb = rf.patch_rebuild_dex(target, root, out=apk_out, ops=ops, sign=True)
+        rb = rf.patch_rebuild_dex(target, root, out=apk_out, ops=ops or None,
+                                  sign=True)
     gate["签名"] = "通过" if rb.verified else "未通过"
     gate["回读"] = "确认" if rb.roundtrip else "未确认"
     if not rb.ok:
         raise RuntimeError("打包失败，备份在「备份」目录。")
+    if not rb.roundtrip:
+        put("- ⚠ 回读未确认：新包里没读到补丁痕迹，装上去很可能还要卡密。"
+            "（回读是唯一能证明补丁真的进了 dex 的证据，不确认就别说生效）")
     put(f"- ✓ 成品：`{rb.apk}`")
     final_apk = Path(rb.apk)
     LED.outp("④ 重打包", final_apk, "apktool 重建 + 签名 + 验签", "APK", "apk")
@@ -520,7 +583,7 @@ def do_desktop(prod: Path, tag: str = "已绕过") -> None:
     try:
         from rf.tools.desktop import drop_to_desktop
         global desktop_apk
-        stem = split_ext(target.name)[0]
+        stem = base_stem(target.name)
         dp, msg = drop_to_desktop(prod, name=stem, tag=tag)
         desktop_apk = dp
         put(f"- ✓ {msg}")
@@ -598,7 +661,7 @@ if _nonapk:
             do_auth_any(root)
             if stage != "patch":
                 main_product = do_pack_any(root)
-                stem = split_ext(target.name)[0]
+                stem = base_stem(target.name)
                 bundle = do_dec_bundle(stem)
                 if main_product is not None:
                     do_desktop(main_product, tag="已处理")
