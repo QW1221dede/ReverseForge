@@ -130,6 +130,43 @@ def _candidate_periods(ks: bytes, max_period: int) -> list[int]:
     return out or [n]
 
 
+def _complete_key(data: bytes, off: int, ks: bytes, period: int) -> bytes:
+    """
+    周期大于已知密钥流长度时，用频率分析补全未知位置。
+
+    crib 只给了 L 个字节的密钥流，真实周期 p 可能 > L（例如 7 字节 crib、
+    8 字节密钥）。_candidate_periods 只认 p<=L 的自洽周期，于是 p=8 被漏掉。
+    这里换个思路：对 p 的每个位置 j，收集密文中所有 i%p==j 的字节，
+    已知位置用 crib 的约束，未知位置试 256 种密钥取"解密后最像英文"的。
+    """
+    key = bytearray(period)
+    # 先填已知约束
+    for i, k in enumerate(ks):
+        key[i % period] = k
+    # 频率补全（英文/JSON 里空格 e t a o 最常见）
+    freq = b" etaoinshrdlcumwfgypbvkjxqz"
+    for j in range(period):
+        if j < len(ks):                      # 已被 crib 约束
+            continue
+        col = [data[off + i] for i in range(j, len(data) - off, period)
+               if off + i < len(data)]
+        if not col:
+            key[j] = 0
+            continue
+        best_k, best_score = 0, -1e9
+        for k in range(256):
+            plaintext = [b ^ k for b in col]
+            # 英文字符 + 常见 JSON 符号得分高，控制字符/高位字节扣分
+            sc = sum((3 if c in (32, 34, 58, 44, 125) else
+                      2 if 97 <= c <= 122 or 65 <= c <= 90 else
+                      1 if 48 <= c <= 57 else
+                      -3 if c < 32 or c > 126 else 0) for c in plaintext)
+            if sc > best_score:
+                best_score, best_k = sc, k
+        key[j] = best_k
+    return bytes(key)
+
+
 def crib_attack(data: bytes, cribs: list[bytes] | None = None,
                 offsets: list[int] | None = None,
                 max_period: int = 64,
@@ -161,8 +198,17 @@ def crib_attack(data: bytes, cribs: list[bytes] | None = None,
                 continue
             ks = bytes(a ^ b for a, b in zip(data[off:off + L], crib))
 
-            for p in _candidate_periods(ks, max_period):
-                key = derive_key(ks, p)
+            periods = _candidate_periods(ks, max_period)
+            # 补全：真实周期可能长于 crib（7字节crib + 8字节密钥）。
+            # 只试常见密钥长度，且必须 >= L；全试 L+1..32 会拖垮时间预算。
+            for p in (8, 12, 16, 24, 32, 6, 10, 20):
+                if L < p <= max_period and p not in periods:
+                    periods.append(p)
+            for p in periods:
+                if p <= L:
+                    key = derive_key(ks, p)
+                else:
+                    key = _complete_key(data, off, ks, p)
                 plain = _decrypt_all(data, key, off, p)
 
                 # —— 关键：把 crib 覆盖的那一段剔掉再判 ——

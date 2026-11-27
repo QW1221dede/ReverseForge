@@ -318,6 +318,85 @@ def _utf8_prefix_end(data: bytes, limit: int = 8 * 1024 * 1024) -> int:
         return e.start
 
 
+def _line_text_end(data: bytes, limit: int = 2 * 1024 * 1024) -> tuple[int, str]:
+    """
+    基于"行"找中文明文头 → 文本形态密文（base64/hex/引号串）的分界。
+
+    为什么需要它：_prefix_text_end 走 _ascii_run_end，中文 UTF-8 字节 >=0x80
+    在第 26 字节就截断；而密文是 base64/hex 时全是可打印 ASCII，
+    _snap_boundary 的"后面不可打印"判据也永远不成立。两个坑叠一起，
+    真实外挂（一大段中文注释头 + 后面加密串）就彻底漏检。
+
+    做法：逐行看，前面"像自然语言/代码"的行一直算明文；
+    一旦出现"长且高熵、字符表极窄（base64/hex）"的行，认定密文起点。
+    返回 (边界字节偏移, 说明)。
+    """
+    blob = data[:limit]
+    lines = blob.split(b"\n")
+    off = 0
+    text_end = 0
+    seen_text = False
+    for raw_ln in lines:
+        ln = raw_ln + (b"\n" if off + len(raw_ln) < len(blob) else b"")
+        body = raw_ln.rstrip(b"\r")
+        if not body:
+            off += len(ln)
+            continue
+        try:
+            s = body.decode("utf-8")
+        except UnicodeDecodeError:
+            # 二进制密文行：UTF-8 解不动，但前面已有足够明文 → 这里就是边界。
+            # 真实外挂的中文注释头 + 二进制密文就走这条。
+            if seen_text and text_end >= 32:
+                p = text_end
+                while p < len(blob) and blob[p:p + 1] in (b"\n", b"\r", b" "):
+                    p += 1
+                return p, f"行级探测：明文头 {text_end}B → 二进制密文行"
+            break
+        # 纯 ASCII 且超长、字符表窄 → 密文行（base64/hex）
+        is_b64 = (len(s) >= 40 and re.fullmatch(r"[A-Za-z0-9+/=_-]+", s) is not None
+                  and (re.search(r"[0-9]", s) and re.search(r"[A-Za-z]", s)))
+        is_hex = (len(s) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", s) is not None)
+        # 引号包裹的长串：KEY = "...." / DATA = '....'
+        quoted = re.match(r'^\s*\w+\s*=\s*["\']([A-Za-z0-9+/=_\-]{40,})', s)
+        if is_b64 or is_hex or quoted:
+            if seen_text and text_end >= 8:
+                # text_end 可能落在密文前的空行处，要跳到密文真正起点。
+                while off < len(blob) and blob[off:off + 1] in (b"\n", b"\r", b" "):
+                    off += 1
+                return off, f"行级探测：明文头 {text_end}B → 文本密文（{'base64' if is_b64 else 'hex' if is_hex else '引号串'}）"
+            break
+        # 这行像明文（含中文 / 常见代码符号 / 自然语言）
+        printable_ratio = sum(1 for c in body if 32 <= c < 127 or c >= 0x80) / len(body)
+        ent = shannon(body) if len(body) >= 24 else 0.0
+        # 高熵的可打印行是"伪装成文本的密文"（单字节 XOR 后仍是 ASCII），
+        # 自然语言片段的熵很少超过 5.6。前面已有明文时，这里就是边界。
+        if seen_text and text_end >= 32 and ent >= 5.6 and len(body) >= 32:
+            p = text_end
+            while p < len(blob) and blob[p:p + 1] in (b"\n", b"\r", b" "):
+                p += 1
+            return p, f"行级探测：明文头 {text_end}B → 高熵密文行（熵 {ent:.2f}）"
+        # garble 可读性判据：单字节 XOR 后的 ASCII 熵只有 4.7，
+        # 熵判据抓不到，但 garble 分数会从 80+ 掉到 20 多。
+        if seen_text and text_end >= 32 and len(body) >= 24:
+            try:
+                from . import garble as _garble
+                gv = _garble.view(body)
+                if (gv.score or 0) < 38:
+                    p = text_end
+                    while p < len(blob) and blob[p:p + 1] in (b"\n", b"\r", b" "):
+                        p += 1
+                    return p, (f"行级探测：明文头 {text_end}B → "
+                              f"乱码行（可读性 {gv.score}）")
+            except Exception:                                  # noqa: BLE001
+                pass
+        if printable_ratio >= 0.90:
+            text_end = off + len(ln)
+            seen_text = True
+        off += len(ln)
+    return (0, "")
+
+
 def _snap_boundary(data: bytes, approx: int, span: int = 64) -> int:
     """
     把近似的 UTF-8 分界吸附到真实边界。
@@ -379,6 +458,25 @@ def find_split(data: bytes, window: int = 4096, step: int | None = None,
         if data.startswith(_magic):
             sp.note = f"文件头是完整 {_name} 容器，不做明文头+密文切分"
             return sp
+
+    # 优先：中文明文头 + 文本形态密文（base64/hex/引号串）。
+    # 老路径 _prefix_text_end 遇到中文会在第一个非 ASCII 字节截断，
+    # 且 _snap_boundary 不认"可打印的密文"，必须让行级探测先上。
+    # 行级探测给的边界已是行首（精确到字节），无需再吸附；
+    # 而且密文短于 min_tail 时也允许（小配置文件加密后就百来字节）。
+    line_end, line_note = _line_text_end(data)
+    if line_end >= min_head and line_end < n:
+        sp.found = True
+        sp.head_end = line_end
+        sp.head_len = line_end
+        sp.tail_len = n - line_end
+        sp.tail_entropy = shannon(data[line_end:line_end + 131072])
+        sp.head_kind = S_TEXT
+        sp.head_preview = data[:line_end][:400].decode("utf-8", "replace")
+        sp.head_keys = head_keys(data[:line_end])
+        sp.confidence = 88
+        sp.note = line_note
+        return sp
 
     head_end, exact = _prefix_text_end(data)
     if head_end < min_head:

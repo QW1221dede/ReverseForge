@@ -124,9 +124,19 @@ def do_decrypt_any(root: Path) -> int:
     saved = 0
     dec_dir = out / "已解密"
     for i, f in enumerate(cands, 1):
+        # 只跳过"铁定是明文/容器"的文件；注意**不能**跳过 # 开头的脚本 ——
+        # 「大段中文注释头 + 尾部加密块」正是最常见的外挂形态。
+        try:
+            with f.open("rb") as fh:
+                head = fh.read(512)
+        except OSError:
+            continue
+        if head.lstrip()[:1] in (b"{", b"[") or head.startswith(
+                (b"PK", b"\x7fELF", b"\x89PNG", b"\xff\xd8")):
+            continue
         rf.step(f"试解 {f.name}", int(30 + 20 * i / max(1, len(cands))))
         try:
-            rep = rf.decrypt_auto(f, keys=keys, deep=False, top=6)
+            rep = rf.decrypt_auto(f, keys=keys, deep=False, budget=20, top=6)
             if rep.hits:
                 saved += len(rf.decrypt_save(rep, dec_dir, limit=2))
         except Exception as e:                                  # noqa: BLE001

@@ -57,7 +57,9 @@ for i, f in enumerate(files):
     pct = 10 + int(80 * i / max(1, len(files)))
     rf.step(f"试解 {f.name}", pct)
     try:
-        rep = rf.decrypt_auto(f, keys=key_list, deep=bool(deep))
+        # 20s 预算：新增的「密文体独立递归试解」需要额外时间，
+        # 15s 会把大段明文头+弱加密的样本卡在半路。
+        rep = rf.decrypt_auto(f, keys=key_list, deep=bool(deep), budget=40 if deep else 20)
     except Exception as e:                       # noqa: BLE001
         lines.append(f"## {f.name}\n\n- 出错：{e}\n")
         continue
@@ -66,7 +68,9 @@ for i, f in enumerate(files):
     lines.append("")
     lines.append(f"- {rep.summary()}")
     if rep.split.found:
-        lines.append(f"- 分段：明文头 {rep.split.head_len}B + 密文 {rep.split.tail_len}B")
+        lines.append(f"- 分段：明文头 {rep.split.head_len}B + 密文体 {rep.split.tail_len}B"
+                     f"（{rep.split.note}）")
+        lines.append("- 已对密文体单独递归试解，避免明文头稀释打分")
     if rep.hits:
         ok_count += 1
         lines.append("")

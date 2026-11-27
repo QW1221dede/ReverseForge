@@ -140,11 +140,23 @@ def score_output(out: bytes) -> int:
     """
     if not out or len(out) < 4:
         return 0
-    bonus, _ = C.magic_bonus(out)
-    v = garble.view(out[:16384])
+    # 先剥掉尾部填充（TEA/DES 的 \x00 或 PKCS7），否则合法 JSON 会被
+    # padding 判定为"结构损坏"，差 1 分卡在 45 阈值下。
+    probe = out
+    if probe and probe[:1] in (b"{", b"["):
+        trimmed = probe.rstrip(b"\x00 \t\r\n")
+        if len(trimmed) >= 4:
+            probe = trimmed
+    bonus, magic_name = C.magic_bonus(probe)
+    v = garble.view(probe[:16384])
     s = max(v.score, 0)
 
     if bonus >= C.STRONG_MAGIC:
+        # 强魔数假阳性：crib 攻击主动尝试 PK\x03\x04 当已知明文，
+        # 解出来必然带这个头，光凭头就判满分是循环论证。
+        # ZIP 必须能找到 EOCD（PK\x05\x06）才算真容器。
+        if magic_name == "ZIP" and b"PK\x05\x06" not in out[-65557:]:
+            return min(s, 42)
         return min(100, 55 + bonus)
 
     if v.report and v.report.kind in (garble.G_REPLACEMENT, garble.G_CONTROL):
@@ -153,6 +165,34 @@ def score_output(out: bytes) -> int:
     ent = C.shannon(out[:8192])
     if ent > 7.7:
         return min(s, 20)                 # 还是密文，别报
+
+    # —— 结构化文本的一致性校验（关键：错误密钥解出 "us$!b}" 也会得高分）——
+    # 弱魔数 { 只有 1 字节，garble 看到 "{" 开头 + 一些字母就判 clean，
+    # 错误 XOR 密钥解出的半截 JSON 能拿 100 分，把正确答案挤出榜首。
+    # 这里用结构证据二次确认：JSON 能解析 = 铁证；引号不成对 = 降分。
+    sample_text = probe[:16384]
+    head_char = sample_text[:1]
+    if head_char in (b"{", b"["):
+        import json as _json
+        try:
+            txt = sample_text.decode("utf-8")
+            _json.loads(txt)
+            return 100                    # 完整合法 JSON，满分
+        except (UnicodeDecodeError, ValueError):
+            pass
+        # 不能解析：JSON 正文应主要是字母/数字/空白/标点；
+        # $!~^`|\\< 这些是 XOR 错位后的"半截可读"噪音。
+        # 直接 return，避免后面弱魔数 bonus 再把低分抬上去。
+        try:
+            t = sample_text.decode("utf-8", "ignore")
+            clean_chars = set(' \t\r\n":{},.-_/[]')
+            chunk = t[:2048]
+            good = sum(1 for c in chunk if c.isalnum() or c in clean_chars)
+            weird = sum(1 for c in chunk if c in '$!~^`|\\<>' or ord(c) < 32)
+            if t.count('"') % 2 == 1 or good < len(chunk) * 0.92 or weird > len(chunk) * 0.04:
+                return min(44, s)
+        except Exception:                                    # noqa: BLE001
+            pass
 
     # 弱魔数只有在文本本身像话时才算证据
     if bonus and s >= 40:
@@ -192,7 +232,7 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             offsets: list[int] | None = None, top: int = 12,
             deep: bool = False, budget: float | None = None,
             max_bytes: int = 32 * 1024 * 1024,
-            scan_offsets: bool = True) -> SalvageReport:
+            scan_offsets: bool = True, _depth: int = 0) -> SalvageReport:
     """
     自动试解。target 可以是文件路径或 bytes。
     返回 SalvageReport，按得分降序。
@@ -257,12 +297,28 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     seen: set[str] = set()
     solved: bool = False          # 已拿到强魔数满分解（gzip→ELF/ZIP 这类），后续算法可跳过
 
-    def add(method: str, out: bytes, offset: int, key: str = "", note: str = "") -> None:
+    def add(method: str, out: bytes, offset: int, key: str = "", note: str = "",
+            force_score: int = 0) -> None:
         nonlocal hits, near, solved
         rep.tried += 1
         if not out or len(out) < 4:
             return
-        sc = score_output(out)
+        # force_score：递归/外部已验证过的分数，直接采用。
+        # 混合文件（明文头+解密body）整体打分会被明文头稀释，
+        # 但 body 单独验证是 100 分 —— 不能被混合打分过滤掉。
+        sc = force_score or score_output(out)
+        # force_score 来自子结果，但 crib 伪解在 body 里也可能拿满分
+        # （"{" 开头 + garble 判 clean）。对完整 JSON 做铁证校验：
+        # 能 json.loads 的排最前，不能解析但 { 开头的降一档。
+        if force_score and sc >= 95:
+            tail = out[offset:] if 0 <= offset < len(out) else out
+            if tail[:1] in (b"{", b"["):
+                import json as _j
+                try:
+                    _j.loads(tail.rstrip(b"\x00 \t\r\n").decode("utf-8"))
+                    sc = 100                       # 铁证
+                except Exception:                                # noqa: BLE001
+                    sc = min(sc, 94)               # 格式不对，降档
         if sc < 45:
             if sc >= 35:
                 h = hashlib.sha256(out[:8192]).hexdigest()[:16]
@@ -343,6 +399,46 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         if _worth_unwrap(out):
             add(how, out, off, note="压缩层（跳过头部）")
 
+    # ---- 1.5) 密文体独立递归试解（最关键的一步）----
+    #   大段明文头会把打分彻底淹没：body 只有 116B 解对了，
+    #   但 add() 拼上 1108B 明文头后 score_output 看的是整个 file，
+    #   频率/熵判据全被明文头主导，解对的结果反而低分被丢。
+    #   做法：把 body 当独立目标递归跑一遍（depth 限 1），
+    #   命中的结果再拼回明文头。文本形态密文（base64/hex）先解码再递归。
+    if seg.split.found and seg.split.head_end >= 8 and _depth < 1:
+        body = data[seg.split.head_end:]
+        bodies: list[tuple[bytes, str]] = [(body, "密文体")]
+        for dec, chow, _ in _text_cipher_bodies(data, seg):
+            bodies.append((dec, chow))
+        for bi, (bbody, bhow) in enumerate(bodies):
+            if len(bbody) < 8 or time.time() > deadline:
+                continue
+            try:
+                sub = salvage(bbody, key_cands=key_cands, offsets=[0], top=6,
+                              deep=deep, budget=min(budget, 8.0),
+                              _depth=_depth + 1)
+            except TypeError:                        # 老签名兜底
+                continue
+            for h in sub.hits:
+                if not h.out or score_output(h.out) < 45:
+                    continue
+                full = data[:seg.split.head_end] + h.out
+                add(f"{bhow}·独立试解→{h.method}", full, seg.split.head_end,
+                    key=h.key, note=f"{bhow}单独跑（避免明文头稀释打分）",
+                    force_score=h.score)
+
+    # ---- 1.6) ROT13 / Caesar / Atbash（经典弱加密，库里有但一直没接进来）----
+    for off in ({0, seg.split.head_end} if seg.split.found else {0}):
+        if off >= len(data) - 8:
+            continue
+        chunk = data[off:off + 64 * 1024]
+        for name, dec in (("ROT13", C.rot(chunk, 13)), ("Atbash", C.atbash(chunk))):
+            if score_output(dec) >= 55:
+                add(f"{name}·偏移{off}", data[:off] + dec, off, note=name)
+        for shift, dec in C.caesar_all(chunk, top=3):
+            if score_output(dec) >= 55:
+                add(f"Caesar+{shift}·偏移{off}", data[:off] + dec, off, note="凯撒位移")
+
     # ---- 2) 单字节 XOR ----
     for off in body_offsets[:3]:
         chunk = data[off:off + 256 * 1024] if off else sample
@@ -357,8 +453,10 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
     crib_offs = [0]
     if seg.split.found and seg.split.head_end > 0:
         crib_offs.append(seg.split.head_end)
-    # 明文头本身就是最可靠的已知明文：从里面抠出连续可打印片段当 crib，
-    # 喂给 XOR/RC4 类攻击。弱加密只要密钥流重复，有 crib 就能确定解出。
+    # 从明文头抠出的字符串是"补充"已知明文，不能"替换"通用 crib ——
+    # 明文头是注释/代码，密文解出来是 JSON 时，两者的格式毫无交集；
+    # 旧版 cribs=head_cribs or None 会把 {\" 这类通用 crib 全部屏蔽，
+    # 这正是"大段明文头+弱加密"100% 撞不开的直接原因。
     head_cribs: list[bytes] = []
     if seg.split.found and 0 < seg.split.head_end <= 8192:
         head = data[:seg.split.head_end]
@@ -366,17 +464,24 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             head_cribs.append(m.group()[:64])
             if len(head_cribs) >= 6:
                 break
+    all_cribs = list(dict.fromkeys(head_cribs + CR.DEFAULT_CRIBS))
+    # 密文体也必须单独试：crib 必须打在密文的起始位置，
+    # 不能让明文头把偏移 0 占掉（crib_attack 只在给定 off 上试）。
+    crib_target = data[seg.split.head_end:] if seg.split.found else data
+    crib_offs_body = [0]
     try:
-        for ch in CR.crib_attack(data, cribs=head_cribs or None,
-                                 offsets=crib_offs, scorer=score_output):
+        for ch in CR.crib_attack(crib_target, cribs=all_cribs,
+                                 offsets=crib_offs_body, scorer=score_output):
             if not ch.plain:
                 continue
             sc = ch.score or score_output(ch.plain)
             if sc < 45:
                 continue
+            off_global = (seg.split.head_end if seg.split.found else 0) + ch.offset
+            full = (data[:off_global] + ch.plain) if seg.split.found else ch.plain
             add(f"已知明文攻击（{_ks(ch.crib.decode('latin1', 'ignore'))} · "
                 f"密钥 {ch.key.hex()} · 周期 {ch.period}）",
-                ch.plain, ch.offset, key=ch.key.hex(), note=ch.note)
+                full, off_global, key=ch.key.hex(), note=ch.note)
     except Exception as e:                           # noqa: BLE001
         rep.notes.append(f"已知明文攻击跳过：{e}")
 
@@ -431,8 +536,16 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
         if len(raw) >= 4 and tried_keys <= 40:
             rc = C.rc4(data, raw)
             add(f"RC4（{_ks(val)}）", rc, 0, key=val, note=src)
+            # drop 变体：很多实现会先空转 768 轮（OpenSSL/WiFi WEP 常见），
+            # 不对齐的话前 768 字节全是乱的，整段打分永远过不了线。
+            for drop in (768, 3072):
+                rcd = C.rc4(sample, raw, drop=drop)
+                if score_output(rcd) >= 45:
+                    add(f"RC4-drop{drop}（{_ks(val)}）",
+                        C.rc4(data, raw, drop=drop), 0, key=val,
+                        note=f"{src}·空转{drop}轮")
 
-        if tried_keys <= 20:
+        if tried_keys <= 20 or sc >= 70 or src.startswith(("用户", "明文头")):
             for kb, how in K.KeyCand(value=val, source=src).variants((16,)):
                 if len(kb) == 16:
                     add(f"XXTEA（{_ks(val)} · {how}）",
@@ -601,6 +714,46 @@ def salvage(target: str | Path | bytes, key_cands: list[K.KeyCand] | None = None
             rep.notes.append("常见算法全试过没命中。下一步：从程序里找解密函数"
                              "（rf.patch_scan / rf.auth_scan），或 hook 拿明文")
     return rep
+
+
+def _text_cipher_bodies(data: bytes, seg: segments.SegmentMap) -> list[tuple[bytes, str, int]]:
+    """
+    从"明文头 + 文本形态密文"里抠出可解码的密文体。
+    返回 [(解码后的密文字节, 说明, 全局偏移)]。
+
+    真实外挂常见形态：一大段中文注释/代码头，末尾一行
+      ENCRYPTED_DATA = "HbFh..."  或  DATA = '6a2f...'
+    整文件送进 b64_decode_any 会因为前面的中文/换行失败，
+    必须先按段切开，再只解码密文那一段。
+    """
+    if not seg.split.found or seg.split.head_end <= 0:
+        return []
+    body = data[seg.split.head_end:]
+    base = seg.split.head_end
+    out: list[tuple[bytes, str, int]] = []
+
+    # 整段直接解（纯 base64/hex 密文块）
+    for fn, label in ((C.b64_decode_any, "Base64"), (C.hex_decode_any, "Hex")):
+        dec, how = fn(body)
+        if dec and len(dec) >= 8:
+            out.append((dec, f"{label}→{how}", base))
+
+    # 逐行解（密文藏在一行里，行首有 DATA= / ENCRYPTED_DATA= 等标记）
+    for line in body.split(b"\n"):
+        s = line.strip()
+        if len(s) < 16:
+            continue
+        # 跳过赋值前缀，只留引号内或 = 后的串
+        m = re.search(rb"[\"']([A-Za-z0-9+/=_\-]{16,})[\"']", s)
+        if m:
+            s = m.group(1)
+        elif b"=" in s and not s.startswith(b"="):
+            s = s.split(b"=", 1)[1].strip().strip(b"\"'")
+        for fn, label in ((C.b64_decode_any, "Base64"), (C.hex_decode_any, "Hex")):
+            dec, how = fn(s)
+            if dec and len(dec) >= 8 and dec not in (d for d, _, _ in out):
+                out.append((dec, f"{label}行→{how}", base))
+    return out[:12]
 
 
 def _ks(val: str, n: int = 20) -> str:
