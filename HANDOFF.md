@@ -1,7 +1,8 @@
 # ReverseForge 深度交接文档
 
-> 最后更新：2026-11-28 03:55 · 已发布版本 **v1.0.6**（提交 `4bf3223`）
-> 工作树干净；上一版 v1.0.5 = `9917592`
+> 最后更新：2026-11-28 04:05 · 已发布版本 **v1.0.6**（提交 `4bf3223`）
+> 工作树干净；其上另有 2 个文档提交（`4c6ff63` 项目介绍、`22942d5` 标注真实推送状态），
+> HEAD = `22942d5`，已同步 Gitee；上一版 v1.0.5 = `9917592`
 > 接手人先读这份，30 分钟内可接管。项目全貌另见 `PROJECT_STATUS.md`。
 
 ---
@@ -18,7 +19,8 @@
 
 - **协议**：AGPL-3.0 + §7 附加条款（禁止商用、传染开源、保留声明）
 - **免责**：`DISCLAIMER.md` 含中文法条（刑法 285/286/217/218、著作权法 24/53、
-  网安法 27、反不正当竞争法 12、软件保护条例 24）+ 主观故意排除声明 + 英文摘要
+  网安法 27、反不正当竞争法 12、软件保护条例 24）+ 主观故意排除声明（第九节）
+  + **作者一侧免责安排与配合义务（第十节）** + 英文摘要
 - **反馈**：m358685@163.com + Gitee/GitHub Issues，**只接受中文**
 - **打赏**：仅邮件沟通（平台禁止二维码/收款码，写了会下架）
 
@@ -261,6 +263,7 @@ git -c credential.helper= -c http.curloptResolve="github.com:443:<可用IP>" \
 ## 八、测试与验证
 
 `tests/` 已从公开仓库移出（`.gitignore` 排除），只在本机保留。当前 **14 套全绿**：
+（下表列 12 套，`selftest_core` 与 `selftest_decrypt` 为冒烟项，未单独计入行）
 
 | 自测 | 覆盖 | 断言数 |
 |---|---|---|
@@ -312,6 +315,9 @@ python -c "from rf.engine.script_runtime import run_cli; \
 - 反馈/Issue/邮件**只接受中文**（README 已声明）。
 - 开源平台不放二维码/收款码，打赏走邮件。
 - 工具用途声明在 README 顶部 + `DISCLAIMER.md`，**改文档别删法条章节**。
+- `DISCLAIMER.md` 第十节「作者一侧的免责安排与配合义务」是追责场景下的关键材料，
+  同样不得删改；其事实基础（拒绝违法定制请求并留痕、只接受中文反馈、源码全程公开）
+  依赖日常行为，任何一次违规接单都会让该节失去支撑。
 - `secrets.github.token` / `.git/rf_tok` 绝不入库（已 gitignore，泄露需用户自行吊销）。
 - 只在用户自有样本/授权目标上验证；不做大规模扫描或对第三方服务压测。
 
@@ -321,7 +327,7 @@ python -c "from rf.engine.script_runtime import run_cli; \
 
 ```bash
 cd /e/ReverseForge
-git log --oneline -8          # 最新应是 4bf3223（v1.0.6）
+git log --oneline -8          # HEAD 应是 22942d5（v1.0.6 之上 2 个文档提交）
 git status                    # 应为干净
 python tests/selftest_live.py # 46 项应全绿
 python tests/selftest_fakepacket.py

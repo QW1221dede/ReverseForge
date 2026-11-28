@@ -71,6 +71,7 @@ from .fakepacket import (find_cards as fp_find_cards,
 from .patch import checkpoints as cpmod
 from .patch import engine as patchmod
 from .patch import netcheck as netmod
+from .secure import gate as _gate
 from .patch import smali as smalimod
 
 
@@ -684,10 +685,12 @@ class Api:
 
     def patch_package(self, root: str | Path) -> str:
         """从解包目录的 AndroidManifest.xml 读包名。"""
+        _gate.require("DEPLOY_RUN")   # 🔒 部署运行需作者联网授权
         return patchmod.package_of(root)
 
     def patch_launch(self, package: str, wait: int = 5) -> dict:
         """装完真跑一次：拉起 launcher → 查进程存活 → 抓崩溃栈。"""
+        _gate.require("DEPLOY_RUN")   # 🔒 部署运行需作者联网授权
         res = patchmod.launch(package, wait)
         self.log(("✓ " if res.get("ok") else "⚠ ") + str(res.get("msg", "")))
         return res
@@ -1317,6 +1320,9 @@ class Api:
 
         返回 {chain, protocols, packets, report, script}。
         """
+        # 🔒 高危出口：真发包需作者电脑联网授权（L0 方案生成不受影响）
+        if send and not dry_run:
+            _gate.require("NET_SEND")
         p = self._need_path(target)
         self.ctx.step("提取协议线索", 20)
         chain = fp_extract(p)
@@ -1475,6 +1481,9 @@ class Api:
 
         没有设备 / 没有 frida 时逐条写清原因，不冒充成功。
         """
+        # 🔒 真机注入/卡密写入需授权；只给 capture_log 的离线解析属 L0
+        if not capture_log:
+            _gate.require("LIVE_HARVEST")
         p = self._need_path(target)
         self.ctx.step("先跑假包管线", 15)
         result = self.fakepacket_build(p)
@@ -1578,6 +1587,8 @@ class Api:
     def auth_apply(self, report, ids: list[str] | None = None,
                    dry_run: bool = False, backup_dir: str | Path | None = None):
         """把脚本里的校验改成恒真（有备份、可回滚、默认先预演）。"""
+        if not dry_run:
+            _gate.require("DEPLOY_RUN")   # 🔒 真正实施绕过授权需授权
         res = authmod.apply_points(report, ids=ids, backup_dir=backup_dir,
                                    dry_run=dry_run)
         for c in res.changed:
@@ -1640,6 +1651,96 @@ class Api:
 # ---------------------------------------------------------------------------
 # 给脚本用的全局实例（运行时会被替换为带 GUI 回调的版本）
 # ---------------------------------------------------------------------------
+
+    # =================== 高危能力授权（2026-11-28）===================
+    # ============ 网络层拦截（透明代理 / mock / 抓包 / 重放）============
+    def hijack_analyze(self, target: str | Path) -> dict:
+        """判断目标该走静态补丁还是网络层，给出策略和依据。"""
+        from rf.fakepacket import hijack
+        return hijack.decide(self._need_path(target))
+
+    def hijack_pack(self, target: str | Path, out_dir: str | Path | None = None,
+                    *, mode: str = "proxy", port: int = 18888) -> dict:
+        """生成网络层运行包：rf_hook.so + conf + run.sh + 说明。
+
+        mode=proxy：请求真发到服务器、响应改写后回给程序（默认）
+        mode=mock ：不外连，本地直接回成功
+        """
+        _gate.require("NET_SEND")
+        from rf.fakepacket import hijack
+        p = self._need_path(target)
+        od = Path(out_dir) if out_dir else (self.out_dir / "假包包")
+        b = hijack.build_bundle(p, od, mode=mode, port=int(port))
+        for line in b.text().splitlines():
+            self.log(line)
+        return {"ok": b.ok, "dir": b.dir, "files": b.files, "error": b.error}
+
+    def hijack_capture(self, log: str | Path) -> dict:
+        """解析 rf_capture.log：真实服务器、请求响应原文、真签名、卡密字段。"""
+        from rf.fakepacket import hijack
+        rep = hijack.parse_capture(self._need_path(log))
+        for line in hijack.render_capture(rep).splitlines():
+            self.log(line)
+        return rep
+
+    def hijack_replay(self, log: str | Path, fields: dict | None = None,
+                      *, dry_run: bool = True, index: int = 0) -> dict:
+        """按字段改写抓包里的请求重发，与原请求对照看服务器改不改口。"""
+        from rf.fakepacket import replay_http
+        if not dry_run:
+            _gate.require("NET_SEND")
+        r = replay_http.replay(self._need_path(log), fields=fields or {},
+                               dry_run=dry_run, index=int(index))
+        if r.get("note"):
+            self.log("  " + r["note"])
+        return r
+
+    def gate_status(self) -> dict:
+        """查看三个高危能力的授权状态。"""
+        return _gate.status()
+
+    def gate_server(self, url: str) -> str:
+        """设置作者电脑的校验地址（你给的 cloudflared 隧道 https 域名）。"""
+        return _gate.set_server_url(url)
+
+    def gate_request(self, cap: str, purpose: str = "") -> str:
+        """生成中文申请文本（含申请码），用于手动发邮件给作者。"""
+        return _gate.request_guide(cap, purpose)
+
+    def gate_apply(self, cap: str, purpose: str) -> dict:
+        """发申请到作者电脑；作者审阅同意后自动回签并解锁。"""
+        return _gate.gate_apply(cap, purpose)
+
+    def gate_unlock(self, ack: str) -> dict:
+        """手工导入作者回签（邮件渠道）。"""
+        import base64 as _b64
+        if ack.startswith("RFGATE-ACK2-"):
+            sig, meta = None, None
+            # 走内部校验：复用 online_authorize 的验签部分
+            from Crypto.PublicKey import RSA as _RSA
+            from Crypto.Signature import pss as _pss
+            from Crypto.Hash import SHA512 as _SHA
+            blob = json.loads(_gate._b64d(ack[len("RFGATE-ACK2-"):]).decode("utf-8"))
+            payload = blob["payload"].encode("utf-8")
+            sig = _gate._b64d(blob["sig"])
+            key = _RSA.import_key(_gate.public_key_path().read_bytes())
+            _pss.new(key).verify(_SHA.new(payload), sig)   # 失败会抛
+            meta = json.loads(payload.decode("utf-8"))
+            if meta.get("cap") not in _gate.CAPABILITIES:
+                raise _gate.GateError("回签能力字段非法")
+            if meta.get("fp") != _gate.machine_fingerprint():
+                raise _gate.GateError("回签与本机指纹不匹配")
+            if int(meta.get("exp", 0)) < int(time.time()):
+                raise _gate.GateError("回签已过期")
+            _gate.save_session(sig, meta)
+            return {"cap": meta["cap"], "unlocked": True}
+        raise _gate.GateError("不是 RFGATE-ACK2 回签码")
+
+    def gate_revoke(self, cap: str = "") -> dict:
+        """撤销本机授权会话。"""
+        _gate.clear_session()
+        return {"cleared": True, "cap": cap or "ALL"}
+
 
 def make_api(ctx: Ctx | None = None) -> Api:
     return Api(ctx or Ctx(quiet=True))

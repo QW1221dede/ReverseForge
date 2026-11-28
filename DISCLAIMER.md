@@ -48,7 +48,7 @@
 
 ## 六、开源许可
 
-本工具以 **MIT License** 发布（见 `LICENSE`）。你可以自由使用、修改、分发，但须保留版权声明与许可声明。
+本工具以 **GNU Affero General Public License v3.0（AGPL-3.0）+ 第 7 条附加条款** 发布（见 `LICENSE`，附加条款在文件末尾，附中英文对照）。附加条款要点：禁止以营利为目的分发或对外提供本程序及其衍生作品、衍生作品必须同样以 AGPL-3.0 + 本附加条款开源（含作为网络服务提供时）、不得移除版权与来源声明；运行未修改版本、内部审计、授权测试、教学研究与个人非营利用途不受限制。你可以自由使用、修改、分发，但须保留版权声明、许可声明与本附加条款。
 
 **分发者请注意**：若你二次分发本工具，必须同时保留本免责声明，并确保接收者知晓上述用途限定。
 
@@ -66,7 +66,7 @@ ReverseForge is a reverse-engineering and security-analysis platform intended **
 
 > 一句话：**这是把刀，给你自己家的东西开箱用的。拿它去撬别人家门，与作者无关。**
 
-## 五、主要相关法律条款（中华人民共和国）
+## 八、主要相关法律条款（中华人民共和国）
 
 以下条款为使用者自行判断合规性的主要参考，本声明对其仅为提示性引用，
 不构成法律意见：
@@ -98,7 +98,7 @@ ReverseForge is a reverse-engineering and security-analysis platform intended **
 以规避其授权验证或付费机制，在上述法律框架下构成侵权乃至犯罪**。
 使用者必须在授权范围内（自有资产 / 书面授权 / 教学研究豁免）使用。
 
-## 六、主观故意的排除声明
+## 九、主观故意的排除声明
 
 作者开发、分发本工具的目的是：
 
@@ -113,7 +113,47 @@ ReverseForge is a reverse-engineering and security-analysis platform intended **
 危害活动而专门提供帮助——本工具的通用性质与上述声明即为对该主观
 要件的否定。
 
-## 七、商标与归属
+为免歧义，特此明确：
+
+1. 本节及本声明全文**不构成对任何违法事实的承认**，也不构成《刑法》
+   第 285 条第 3 款中"明知他人实施危害活动而专门提供帮助"的证据，
+   更不构成任何犯罪的自认。
+2. 作者**从未**发布、也不会发布针对任何具体第三方商业软件的破解方案、
+   脱壳脚本或绕过授权的现成配方；工具提供的是**通用能力**，其价值
+   同样服务于防守方加固自身产品。
+3. 作者**不接受**任何以"帮我破解/绕过某某软件"为诉求的定制需求、赞助
+   或委托；此类请求一律拒绝，且拒绝记录予以留存。若日后发生追责，
+   该等拒绝记录连同开源提交时间线、公开 Issue 与本声明，可共同用于
+   证明作者不具有上述主观明知与专门帮助。
+4. 使用者阅读并接受本声明，即视为知悉：工具被用于违法用途时，作者
+   不接受、不背书、不协助，并将依 §十一 采取相应措施。
+
+## 十、作者一侧的免责安排与配合义务
+
+本节用于说明作者一侧已实际采取的安排，供使用者、平台与依法办案机关
+据以判断责任归属。**本节不是对刑事责任的免除**（刑事责任依法定原则
+认定，不因任何约定而转移），而是作者一侧事实与措施的说明。
+
+1. **工具的中立与通用地位**：本工具为通用逆向分析工作台，不针对任何
+   特定第三方商业软件，不内置特定软件的破解方案、密钥或成品。
+2. **作者一侧无故意的事实基础**：作者不提供绕过授权验证或付费机制的
+   专项服务，不接受此类定制请求；发布渠道公开、源码全程可见、提交
+   历史连续可查；反馈渠道只接受中文，以保留可检索的沟通记录。
+3. **责任不转移**：使用者违反 §一 用途限定或本声明所生的一切民事、
+   行政责任，由该使用者自行承担；作者不因分发、开源或技术支持而
+   对使用者的具体行为承担连带责任。
+4. **配合义务**：收到依法定职权机关的调取、询问或要求时，作者将
+   依法配合，如实提供源码、提交记录、发布记录与拒绝记录，不作虚假
+   陈述，也不作超出必要范围的辩解。
+5. **滥用处置**：发现本工具被用于违法用途、或被用于侵犯第三方权益时，
+   作者将视情形采取下列措施——暂停发布与分发、撤下相关分发渠道、
+   公开声明并说明处置结果、在技术层面加入限制、配合依法溯源；并保留
+   追究相关行为人法律责任的权利。
+6. **对使用者的提示**：使用者在使用本工具前，应自行确认其对目标
+   拥有合法权利或已获授权；一旦发生争议，作者无法替代使用者作出
+   授权证明，"我以为可以用"不构成免责事由。
+
+## 十一、商标与归属
 
 "ReverseForge · 逆锻台"名称及标识归作者所有，未经许可不得用于
 暗示背书的商业宣传。
@@ -121,7 +161,13 @@ ReverseForge is a reverse-engineering and security-analysis platform intended **
 本声明以中文为准。有疑问请在Issue中提出，勿以违法方式"实测"。
 
 ---
-最后更新：2026-11-27（v10，AGPL-3.0 + 禁商用附加条款）
+最后更新：2026-11-28（v10.2，AGPL-3.0 + §7 禁商用附加条款）
+本版修订：① 明确以 AGPL-3.0 + 第 7 条附加条款发布（原 §六 误写 MIT，已更正）；
+② 修正重复的章节编号（法律条款 / 开源许可 / 主观故意声明 三处重号），全篇统一为 一~十；
+③ LICENSE 末尾补入与中文条款对应的英文附加条款，并在文件头部加入 §7 醒目声明；
+④ 新增「十一、作者一侧的免责安排与配合义务」，并强化第九节：明确本声明不构成任何
+   违法事实的自认、不构成《刑法》285 条第 3 款「明知而专门提供帮助」的证据，同时载明
+   作者拒绝违法定制请求并留存记录、配合依法调取、发现滥用即暂停分发的实际行动。
 
 
 ---
@@ -141,9 +187,19 @@ infringing IP, trade secrets or personal information.
 illegal use, and are not liable for any consequences of your use. Before use you must review the
 applicable laws of your jurisdiction — for the PRC these include Criminal Law Arts. 285/286/217/218,
 Copyright Law Arts. 24/53, Cybersecurity Law Art. 27, Anti-Unfair Competition Law Art. 12, and the
-Software Protection Regulations Art. 24 (see Section 5 above, authoritative Chinese text).
+Software Protection Regulations Art. 24 (see Section 8 above, authoritative Chinese text).
 
-**License**: GNU AGPL-3.0 **plus additional terms prohibiting any commercial use** (see LICENSE).
+**Liability allocation / 作者一侧免责安排**: The tool is generic and targets no specific
+commercial product; the author publishes no crack, bypass or licence-removal recipe for any
+named software, and refuses (and logs) any request of that kind. These statements, the
+public commit history and the refusal records are the facts on which the absence of intent
+under Criminal Law Art. 285(3) rests. Nothing in this disclaimer is an admission of any
+illegal act, nor a waiver of criminal liability, which is decided by law and cannot be
+transferred by agreement. The author will cooperate with lawful authorities, and will
+suspend distribution and publicly respond on discovering misuse.
+
+**License**: GNU AGPL-3.0 **plus additional terms prohibiting any commercial use** (see LICENSE,
+Additional Terms at the end of that file, in English and Chinese).
 By downloading or using this tool you declare your use is lawful and authorized.
 
 

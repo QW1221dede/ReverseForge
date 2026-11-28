@@ -1,3 +1,22 @@
+                    ReverseForge · 逆锻台
+                    AGPL-3.0 WITH ADDITIONAL TERMS UNDER SECTION 7
+
+  This program is licensed under the GNU Affero General Public License,
+Version 3 (AGPL-3.0), together with the Additional Terms set out at the end
+of this file.  The Additional Terms are binding on every recipient and on
+every derivative work, in addition to AGPL-3.0 itself.
+
+  In short, and without limiting the full text of the Additional Terms:
+commercial use of this program and of any derivative work is PROHIBITED,
+and every derivative work must remain open source under AGPL-3.0 together
+with these Additional Terms.  If you delete the Additional Terms, you are
+no longer bound by them; the remaining terms of AGPL-3.0 continue to apply
+to you (AGPL-3.0, section 7, paragraph 4).
+
+  Copyright (c) 2026 tw-dm.  The Additional Terms appear in English below,
+followed by the Chinese version; both are equally binding.
+
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
@@ -670,11 +689,13 @@ ReverseForge · 逆锻台 —— 依据 AGPL-3.0 第 7 条的附加条款
   及其衍生作品的再使用额外附加如下约束（与前述条款冲突时，以本节为准；
   依第 7 条第 4 款，删除本节后你仍受 AGPL-3.0 全部条款约束）：
 
-  1. 禁止商用：禁止以任何直接或间接方式将本程序、其衍生作品或其输出
-     成果用于商业目的，包括但不限于销售、收费分发、SaaS/在线服务收费、
-     作为付费产品或付费服务的组成部分、嵌入商业软件或商业硬件中分发、
-     用于营利性商业生产活动。内部安全审计、教学、学术研究等非营利用途
-     不受此限。
+  1. 禁止商用：禁止以营利为目的对下列行为进行分发或对外提供：
+     (a) 销售本程序或其衍生作品；(b) 收费分发；(c) 将本程序或其衍生作品
+     作为付费产品、付费服务（含订阅制、按量计费的在线服务）的组成部分
+     对外提供；(d) 将其嵌入商业软件或商业硬件中分发；(e) 在营利性商业
+     生产活动中使用其输出成果。
+     下列情形不受本条限制：运行本程序的未修改版本（无论是否营利）；
+     内部安全审计、已获授权的测试、教学、学术研究，以及个人非营利用途。
   2. 传染与网络服务：任何人以任何形式修改、衍生本程序（无论是否分发），
      包括将其作为网络服务向用户提供，都必须以 AGPL-3.0 及本附加条款
      向所有用户公开提供完整对应源代码。
@@ -682,3 +703,50 @@ ReverseForge · 逆锻台 —— 依据 AGPL-3.0 第 7 条的附加条款
   4. 用途合规：使用本程序即表示你声明并保证你的用途合法且已获得对
      目标系统的合法权利或授权。违反本声明导致的全部法律后果由使用者
      自行承担，与作者及贡献者无关。
+
+------------------------------------------------------------------------
+ADDITIONAL TERMS — REVERSEFORGE (English)
+
+  Copyright (c) 2026 tw-dm
+
+  In addition to the terms and conditions of the GNU Affero General Public
+License, Version 3 (AGPL-3.0), the following additional terms apply to this
+program and to any derivative work of it (the "Additional Terms").  These
+Additional Terms are granted under, and pursuant to, section 7 of AGPL-3.0.
+Where these Additional Terms conflict with AGPL-3.0, these Additional Terms
+prevail.  Under section 7, paragraph 4, if you delete these Additional Terms
+you are no longer bound by them, while the remaining terms of AGPL-3.0
+continue to apply to you.
+
+  1. No commercial use.  You may not, for profit, distribute or make
+     available to others, by any means, this program, any derivative work
+     of it, or any output produced with it, including but not limited to:
+     (a) selling it; (b) charging for its distribution; (c) making it
+     available as a paid product or as part of a paid service, including
+     any subscription-based or metered online service; (d) distributing it
+     as part of commercial software or commercial hardware; and (e) using
+     its output in profit-seeking commercial production.
+
+     The following are not restricted by this paragraph: running an
+     unmodified version of this program, whether or not for profit; and
+     internal security auditing, authorized testing, teaching, academic
+     research, and personal non-commercial use.
+
+  2. Copyleft, including over a network.  Any derivative work of this
+     program, whether or not it is distributed, and any use of it as a
+     network service offered to users, must be licensed under AGPL-3.0
+     together with these Additional Terms, and the complete corresponding
+     source code must be made available to every user of it, as required by
+     AGPL-3.0 sections 6 and 13.
+
+  3. Retention of notices.  You must not remove, obscure, or alter the
+     copyright notice, the disclaimer, or the source attribution of this
+     program.
+
+  4. Lawful use.  By using this program you represent and warrant that your
+     use is lawful and that you hold the rights, or have obtained the
+     authorization, required to operate on your targets.  All legal
+     consequences arising from your use are borne solely by you; the author
+     and the contributors accept no liability for them.
+
+------------------------------------------------------------------------

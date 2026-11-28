@@ -93,6 +93,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from rf.analysis import readable as _readable
+
 from rf.tools.desktop import base_stem, split_ext
 
 
@@ -320,6 +322,13 @@ def do_decrypt_any(root: Path) -> int:
                 for fp in files:
                     _dec_files.append(Path(fp))
                     LED.outp("② 解密", Path(fp), f"从 {f.name} 解出")
+                    # 自动出一份人能读的文本报告（不再是打开就乱码的 .bin）
+                    try:
+                        rp = _readable.render(Path(fp))
+                        if rp != Path(fp):
+                            LED.outp("② 解密", rp, "可读报告（记事本直接打开这份）")
+                    except Exception:
+                        pass
         except Exception as e:                              # noqa: BLE001
             put(f"    ! {f.name}：{e}")
     put(f"- ✓ 解密命中落盘 {saved} 份 → 已解密/" if saved
@@ -352,6 +361,103 @@ def do_auth_any(root: Path) -> int:
         put("- 没有能自动改的校验点；PE/ELF 类的偏移定位见上方清单，"
             "用 Ghidra 改跳转")
     return changed
+
+
+# ---------------------------------------------------------------------------
+# ③c 假包层：静态补丁 or 网络劫持，自动选
+# ---------------------------------------------------------------------------
+def do_fakepacket(root: Path) -> list:
+    """对 native/自解压样本自动出假包：能静态补就补，补不动就网络层劫持。"""
+    rf.step("③c 假包层（自动选静态补丁 / 网络劫持）", 60)
+    try:
+        from rf.fakepacket import hijack
+    except Exception as e:                                  # noqa: BLE001
+        put(f"- 假包模块不可用：{e}")
+        return []
+
+    # 授权闸门：假包属于对外生效能力，未授权则只报方案不产物
+    allowed, why = True, ""
+    try:
+        from rf.secure import gate
+        gate.require("NET_SEND")
+    except Exception as e:                                  # noqa: BLE001
+        allowed, why = False, str(e)[:80]
+
+    cands: list[Path] = []
+    if target.is_file():
+        cands.append(target)
+    for pat in ("*.bin", "*.so", "*.elf"):
+        for p in root.rglob(pat):
+            if p.is_file() and p.stat().st_size > 64 * 1024:
+                cands.append(p)
+    seen, uniq = set(), []
+    for p in cands:
+        k = str(p).resolve().lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(p)
+
+    made: list[Path] = []
+    notes: list[str] = []
+    for p in uniq[:6]:
+        try:
+            d = hijack.decide(p)
+        except Exception as e:                              # noqa: BLE001
+            notes.append(f"- {p.name}：判定失败 {e}")
+            continue
+        strat = d.get("strategy")
+        if strat == "static_patch":
+            try:
+                from rf.patch.native import patch_native
+                r = patch_native(p, dry_run=False)
+                if r.ok:
+                    made.append(p)
+                    notes.append(f"- {p.name}：静态补丁 ✓ {len(r.log)} 条改动")
+                else:
+                    notes.append(f"- {p.name}：静态补丁失败（{r.errors[:1]}）")
+            except Exception as e:                          # noqa: BLE001
+                notes.append(f"- {p.name}：静态补丁异常 {e}")
+        elif strat == "net_hijack":
+            if not allowed:
+                notes.append(f"- {p.name}：可走网络劫持，但未授权（{why}）")
+                continue
+            dst = root / "假包包" / (p.stem[:36] or "target")
+            b = hijack.build_bundle(p, dst, port=int(d.get("port", 18888)),
+                                    mode=str(d.get("mode", "proxy")),
+                                    mock_json=d.get("mock_json"))
+            if b.ok:
+                made.append(dst)
+                why = "；".join(d.get("reasons", []))[:90]
+                notes.append(f"- {p.name}：网络层 ✓ → {dst.relative_to(root)}"
+                             + (f"（依据：{why}）" if why else ""))
+                notes.append("    模式 proxy：请求转发真服务器，响应原样带回，"
+                             "全程录进 rf_capture.log（含真签名）")
+            else:
+                notes.append(f"- {p.name}：假包生成失败 {b.error}")
+        else:
+            notes.append(f"- {p.name}：无法自动处理（{'；'.join(d.get('reasons', []))[:60]}）")
+
+    for line in notes:
+        put(line)
+    if made:
+        put(f"- ✓ 假包产物 {len(made)} 份，已写入「假包包/」")
+        try:
+            rep = root / "详细资料" / "假包报告.md"
+            rep.parent.mkdir(parents=True, exist_ok=True)
+            rep.write_text(
+                "# 假包层报告\n\n"
+                + "\n".join(notes)
+                + "\n\n## 怎么用\n\n网络劫持产物：整个目录传到手机（Termux 或 MT 管理器），"
+                  "执行 `chmod +x run.sh && sh run.sh`。\n"
+                  "外连会被劫持到本地 mock，任何请求都返回验证通过，卡密随便输。\n",
+                encoding="utf-8")
+            put(f"- 报告：{rep.relative_to(root)}")
+        except Exception:                                   # noqa: BLE001
+            pass
+    elif notes:
+        put("- 本轮没有生成假包，原因见上")
+    return made
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +1033,14 @@ def _io_tables() -> list[str]:
 def _write_manifest() -> tuple[Path, Path]:
     md = out / "产物清单.md"
     js = out / "manifest.json"
+    # 收尾：给所有二进制产物补可读报告，保证「出来就是能看的」
+    try:
+        n_report = len(_readable.render_tree(out))
+        if n_report:
+            put(f"- 已生成 {n_report} 份「.可读报告.txt」：直接用记事本打开即可")
+    except Exception:
+        pass
+
     head = ["# 产物清单（进 → 出）", "",
             f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
             f"- 原始文件：`{target}`",
@@ -972,6 +1086,7 @@ if _nonapk:
         do_decrypt_any(root)
         if stage not in ("decrypt",):
             do_auth_any(root)
+            do_fakepacket(root)
             if stage != "patch":
                 main_product = do_pack_any(root)
                 stem = base_stem(target.name)

@@ -34,3 +34,16 @@ tests/
 *.token
 secrets.*
 test_target.txt
+
+# --- 授权锁私钥与测试产物（绝不入库） ---
+gate_private.pem
+*_priv.pem
+*.pem
+!gate_public.pem
+logs/gate_decisions.jsonl
+
+# --- 高危能力明文源：只在本机封包成 gated_mods/*.enc.json，明文绝不入库 ---
+tools/gated_src/
+
+# --- 本地备份目录（改文档前的手工备份，不入库） ---
+.bak_*/
