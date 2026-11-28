@@ -7,6 +7,21 @@ analyze auth-checkpoints, auto-decrypt, patch, rebuild & re-sign — all offline
 > For learning, research, and **authorized** testing only. Do NOT use it to
 > bypass licensing of software you don't own. See [DISCLAIMER.md](DISCLAIMER.md).
 
+> ### Restricted modules — not available in the public build
+>
+> Under the laws of the People's Republic of China, three capability classes —
+> **live packet transmission to third-party servers, on-device injection, and
+> deploying license bypasses** — ship in **encrypted form** and will not run
+> without authorization.
+>
+> To request access, email the author with your use case and legal basis.
+> Once reviewed, a **machine-fingerprint-bound key** is issued.
+>
+> **Email: m358685@163.com**
+>
+> Static analysis, unpacking, decompilation, decryption, string extraction and
+> plan generation remain **fully available without authorization**.
+
 ## Features
 - Full-auto pipeline: unpack -> decrypt -> remove pre-run license checks -> rebuild & sign -> drop result to Desktop
 - Cross-type auth checkpoint scanning (callbacks, string gates, server re-validation)

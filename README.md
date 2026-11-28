@@ -9,6 +9,12 @@
 > **2. 仅限自有或已授权目标。**
 > 破解、盗版、未授权获取他人数据、制作外挂或恶意软件 —— 一律禁止。
 > 完整条款见 [DISCLAIMER.md](DISCLAIMER.md)，下载即视为同意。
+>
+> **3. 部分模块不随公开版本开放。**
+> 因中华人民共和国现行法律对逆向工程与安全工具的限制，涉及**向第三方服务器实际发包、真机注入、授权绕过落地**的三类能力，在公开版本中以**加密形态**存在，未获授权时无法运行。
+> 使用前请邮件说明用途与合法性依据，**作者审核通过后按你的机器指纹签发专属密钥**。
+> 邮箱：**m358685@163.com**
+> 静态分析、拆包、反编译、解密、字符串提取、方案生成与预演 —— **不受影响，照常可用**。
 
 ---
 
@@ -25,6 +31,12 @@ by **scripts** — one line like `rf.apk_unpack(path)` runs unpack + decompile, 
 - **42 code blocks + resident terminal + local HTTP API** for AI orchestration.
 
 > **English notice**: AV engines may flag it (PyInstaller + injection-style capabilities) — whitelist `%LOCALAPPDATA%\ReverseForge` first, see [SECURITY.md](SECURITY.md). Use **only** on software you own or are explicitly authorized to test; cracking, piracy and malware-making are strictly forbidden — see [DISCLAIMER.md](DISCLAIMER.md).
+
+> **Restricted modules — not available in the public build.**
+> Under the laws of the People's Republic of China, three capability classes — **live packet transmission to third-party servers, on-device injection, and deploying license bypasses** — ship in **encrypted form** and will not run without authorization.
+> To request access, email the author with your use case and legal basis. Once reviewed, a **machine-fingerprint-bound key** is issued.
+> Email: **m358685@163.com**
+> Static analysis, unpacking, decompilation, decryption, string extraction and plan generation remain **fully available without authorization**.
 
 **License: GNU AGPL-3.0 with additional terms — commercial use is prohibited.** Any derivative (including running it as a network service) must remain AGPL-3.0 open-source with these terms preserved.
 
